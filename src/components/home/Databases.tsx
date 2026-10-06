@@ -18,7 +18,8 @@ import type { DatabaseInfo as PlainDatabaseInfo, PlayerGameInfo } from "@/bindin
 import { commands, events } from "@/bindings";
 import { sessionsAtom } from "@/state/atoms";
 import { activeDatabaseViewStore } from "@/state/store/database";
-import { getDatabases, query_players } from "@/utils/db";
+import { error as logError } from "@tauri-apps/plugin-log";
+import { getDatabases, PERSONAL_DATABASES_KEY, PERSONAL_INFO_KEY, query_players } from "@/utils/db";
 import type { Session } from "@/utils/session";
 import { unwrap } from "@/utils/unwrap";
 import { DatabaseViewStateContext } from "../databases/DatabaseViewStateContext";
@@ -63,8 +64,9 @@ function Databases() {
       .filter(
         (s) => s.player === name || s.lichess?.username === name || s.chessCom?.username === name,
       )
+      // Must match the title given by AccountCard, which uses lichess' canonical username casing
       .map((s) =>
-        s.chessCom ? `${s.chessCom.username} Chess.com` : `${s.lichess?.username} Lichess`,
+        s.chessCom ? `${s.chessCom.username} Chess.com` : `${s.lichess?.account.username} Lichess`,
       ),
   }));
 
@@ -76,7 +78,7 @@ function Databases() {
   }, [sessions]);
 
   const { data: databases } = useSWRImmutable<DatabaseInfo[]>(
-    sessions.length === 0 ? null : ["personalDatabases", sessions],
+    sessions.length === 0 ? null : [PERSONAL_DATABASES_KEY, sessions],
     async () => {
       const dbs = (await getDatabases()).filter((db) => db.type === "success");
       return dbs.filter((db) => isDatabaseFromSession(db, sessions));
@@ -88,31 +90,37 @@ function Databases() {
     isLoading,
     error,
   } = useSWRImmutable<PersonalInfo[]>(
-    databases && name ? ["personalInfo", name, databases] : null,
+    databases && name ? [PERSONAL_INFO_KEY, name, databases] : null,
     async () => {
       const playerDbs = playerDbNames.find((p) => p.name === name)?.databases;
       if (!databases || !playerDbs) return [];
-      const results = await Promise.allSettled(
-        databases
-          .filter((db) => playerDbs.includes((db.type === "success" && db.title) || ""))
-          .map(async (db, i) => {
-            const players = await query_players(db.file, {
-              name: db.username,
-              options: {
-                pageSize: 1,
-                direction: "asc",
-                sort: "id",
-                skipCount: false,
-              },
-            });
-            if (players.data.length === 0) {
-              throw new Error("Player not found in database");
-            }
-            const player = players.data[0];
-            const info = unwrap(await commands.getPlayersGameInfo(db.file, player.id));
-            return { db, info };
-          }),
+      const matchingDbs = databases.filter((db) =>
+        playerDbs.includes((db.type === "success" && db.title) || ""),
       );
+      const results = await Promise.allSettled(
+        matchingDbs.map(async (db) => {
+          const players = await query_players(db.file, {
+            name: db.username,
+            options: {
+              pageSize: 1,
+              direction: "asc",
+              sort: "id",
+              skipCount: false,
+            },
+          });
+          if (players.data.length === 0) {
+            throw new Error("Player not found in database");
+          }
+          const player = players.data[0];
+          const info = unwrap(await commands.getPlayersGameInfo(db.file, player.id));
+          return { db, info };
+        }),
+      );
+      results.forEach((r, i) => {
+        if (r.status === "rejected") {
+          logError(`Failed to load personal stats from ${matchingDbs[i].file}: ${r.reason}`);
+        }
+      });
       return results
         .filter((r) => r.status === "fulfilled")
         .map((r) => (r as PromiseFulfilledResult<PersonalInfo>).value);

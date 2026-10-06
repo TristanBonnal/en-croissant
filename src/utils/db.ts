@@ -1,7 +1,7 @@
 import { resolve } from "@tauri-apps/api/path";
 import { readDir } from "@tauri-apps/plugin-fs";
 import { fetch } from "@tauri-apps/plugin-http";
-import useSWR from "swr";
+import useSWR, { mutate } from "swr";
 import {
     commands,
     type DatabaseInfo,
@@ -94,6 +94,20 @@ export async function getDatabases(): Promise<DatabaseInfo[]> {
     return (await Promise.allSettled(dbs.map((db) => getDatabase(db.name))))
         .filter((r) => r.status === "fulfilled")
         .map((r) => (r as PromiseFulfilledResult<DatabaseInfo>).value);
+}
+
+export const PERSONAL_DATABASES_KEY = "personalDatabases";
+export const PERSONAL_INFO_KEY = "personalInfo";
+
+// The personal stats panel caches its data with useSWRImmutable, so it must be
+// invalidated whenever an account database is created or updated.
+export function invalidatePersonalStats() {
+    return mutate(
+        (key) =>
+            Array.isArray(key) &&
+            (key[0] === PERSONAL_DATABASES_KEY || key[0] === PERSONAL_INFO_KEY),
+        undefined,
+    );
 }
 
 async function getDatabase(name: string): Promise<DatabaseInfo> {

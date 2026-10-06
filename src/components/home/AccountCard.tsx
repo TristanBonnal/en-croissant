@@ -29,7 +29,7 @@ import type { DatabaseInfo } from "@/bindings";
 import { commands, events } from "@/bindings";
 import { databaseConversionStateAtom, storedDatabasesDirAtom } from "@/state/atoms";
 import { downloadChessCom } from "@/utils/chess.com/api";
-import { getDatabases, query_games } from "@/utils/db";
+import { getDatabases, invalidatePersonalStats, query_games } from "@/utils/db";
 import { capitalize } from "@/utils/format";
 import { downloadLichess } from "@/utils/lichess/api";
 import { unwrap } from "@/utils/unwrap";
@@ -240,6 +240,7 @@ export function AccountCard({
                       targetDatabaseTitle: null,
                       sourceFileName: null,
                     }));
+                    await invalidatePersonalStats();
                   }
                   setLoading(false);
                 }}
