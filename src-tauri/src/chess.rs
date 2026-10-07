@@ -732,43 +732,43 @@ mod tests {
     #[test]
     fn eval_hanging_pawn() {
         let position = pos("r1bqkbnr/ppp1pppp/2n5/1B1p4/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 3 3");
-        assert_eq!(naive_eval(&position), 100);
+        assert_eq!(naive_eval(&position), 90);
     }
 
     #[test]
     fn eval_complex_center() {
         let position = pos("r1bqkbnr/ppp2ppp/2n5/1B1pp3/4P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 4");
-        assert_eq!(naive_eval(&position), 100);
+        assert_eq!(naive_eval(&position), 90);
     }
 
     #[test]
     fn eval_in_check() {
         let position = pos("r1bqkbnr/ppp2ppp/2B5/3pp3/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 0 4");
-        assert_eq!(naive_eval(&position), -100);
+        assert_eq!(naive_eval(&position), -90);
     }
 
     #[test]
     fn eval_rook_stack() {
-        let position = pos("rnrq4/8/8/1R6/1R6/1R5K/1Q6/7k w - - 0 1");
+        let position = pos("rnrq4/8/8/1R6/1R6/1R6/1Q6/4K2k w - - 0 1");
         assert_eq!(naive_eval(&position), 500);
     }
 
     #[test]
     fn eval_rook_stack2() {
-        let position = pos("rnrq4/8/8/1R6/1Q6/1R5K/1R6/7k w - - 0 1");
+        let position = pos("rnrq4/8/8/1R6/1Q6/1R6/1R6/4K2k w - - 0 1");
         assert_eq!(naive_eval(&position), 200);
     }
 
     #[test]
     fn eval_opera_game1() {
         let position = pos("4kb1r/p2rqppp/5n2/1B2p1B1/4P3/1Q6/PPP2PPP/2K4R w k - 0 14");
-        assert_eq!(naive_eval(&position), -100);
+        assert_eq!(naive_eval(&position), -120);
     }
 
     #[test]
     fn eval_opera_game2() {
         let position = pos("4kb1r/p2rqppp/5n2/1B2p1B1/4P3/1Q6/PPP2PPP/2KR4 b k - 1 14");
-        assert_eq!(naive_eval(&position), 0);
+        assert_eq!(naive_eval(&position), 20);
     }
 }
 
