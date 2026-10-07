@@ -6,6 +6,7 @@ import { useTranslation } from "react-i18next";
 import { useSWRConfig } from "swr";
 import { commands, type NormalizedGame } from "@/bindings";
 import { activeTabAtom, tabsAtom } from "@/state/atoms";
+import { invalidatePersonalStats } from "@/utils/db";
 import { createTab } from "@/utils/tabs";
 import GameInfo from "../common/GameInfo";
 import GamePreview from "./GamePreview";
@@ -72,6 +73,7 @@ function GameCard({
                       undefined,
                       { revalidate: true },
                     );
+                    invalidatePersonalStats();
                   });
                 }}
               >

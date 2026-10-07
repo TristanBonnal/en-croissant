@@ -100,7 +100,7 @@ export const PERSONAL_DATABASES_KEY = "personalDatabases";
 export const PERSONAL_INFO_KEY = "personalInfo";
 
 // The personal stats panel caches its data with useSWRImmutable, so it must be
-// invalidated whenever an account database is created or updated.
+// invalidated whenever a database is created, modified or deleted.
 export function invalidatePersonalStats() {
     return mutate(
         (key) =>

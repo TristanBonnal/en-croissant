@@ -38,7 +38,7 @@ import {
   storedDatabasesDirAtom,
 } from "@/state/atoms";
 import { useActiveDatabaseViewStore } from "@/state/store/database";
-import { getDatabases, type SuccessDatabaseInfo } from "@/utils/db";
+import { getDatabases, invalidatePersonalStats, type SuccessDatabaseInfo } from "@/utils/db";
 import { formatBytes, formatNumber } from "@/utils/format";
 import { unwrap } from "@/utils/unwrap";
 import ConfirmModal from "../common/ConfirmModal";
@@ -118,6 +118,7 @@ export default function DatabasesPage() {
           if (!selectedDatabase) return;
           commands.deleteDatabase(selectedDatabase.file).then(() => {
             mutate();
+            invalidatePersonalStats();
             setSelected(null);
           });
           toggleDeleteModal();
@@ -422,6 +423,7 @@ export default function DatabasesPage() {
                           try {
                             await commands.convertPgn(files, selectedDatabase.file, null, "", null);
                             mutate();
+                            invalidatePersonalStats();
                           } finally {
                             setConversionState((prev) => ({
                               ...prev,
@@ -486,7 +488,13 @@ function GeneralSettings({
   useEffect(() => {
     commands
       .editDbInfo(selectedDatabase.file, debouncedTitle ?? null, debouncedDescription ?? null)
-      .then(() => mutate());
+      .then(() => {
+        mutate();
+        // Personal databases are matched by title
+        if (debouncedTitle !== selectedDatabase.title) {
+          invalidatePersonalStats();
+        }
+      });
   }, [debouncedTitle, debouncedDescription]);
 
   return (
@@ -536,6 +544,7 @@ function PlayerMerger({ selectedDatabase }: { selectedDatabase: DatabaseInfo }) 
     const res = await commands.mergePlayers(selectedDatabase.file, player1, player2);
     setLoading(false);
     unwrap(res);
+    invalidatePersonalStats();
   }
 
   return (
@@ -593,6 +602,7 @@ function DuplicateRemover({
               .then(() => {
                 setLoading(false);
                 reload();
+                invalidatePersonalStats();
               })
               .catch(() => {
                 setLoading(false);
