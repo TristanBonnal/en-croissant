@@ -80,6 +80,10 @@ function searchParams(config: SearchConfig, fen: string, plies: number): BestLin
             minShare: settings.branchMinShare,
             maxReplies: settings.mode === "tree" ? settings.branchMaxReplies : 1,
             maxDepth: settings.branchDepth,
+            trapMinShare:
+                settings.mode === "tree" && settings.trapBranching
+                    ? settings.trapMinShare
+                    : undefined,
         },
     };
 }
@@ -264,6 +268,7 @@ export function toTreeMoves(nodes: BestLineNode[], color: "white" | "black"): Tr
             san: node.san,
             comment: textColor ? colorComment(text, textColor) : text,
             score: node.score,
+            annotation: node.annotation,
             children: node.children.map(convert),
         };
     };

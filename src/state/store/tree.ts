@@ -549,11 +549,15 @@ export const createTreeStore = (id?: string, initialTree?: TreeState) => {
     return createStore<TreeStoreState>()(stateCreator);
 };
 
-export type LineMove = { san: string; comment?: string; score?: Score };
+export type LineMove = { san: string; comment?: string; score?: Score; annotation?: Annotation };
 export type TreeMove = LineMove & { children: TreeMove[] };
 
 /** Plays `move` from the current position; sets its comment (if it has none) and score. */
-function playLineMove(state: TreeState, { san, comment, score }: LineMove, sound: boolean) {
+function playLineMove(
+    state: TreeState,
+    { san, comment, score, annotation }: LineMove,
+    sound: boolean,
+) {
     const node = getNodeAtPath(state.root, state.position);
     const [pos] = positionFromFen(node.fen);
     if (!pos) return false;
@@ -566,6 +570,9 @@ function playLineMove(state: TreeState, { san, comment, score }: LineMove, sound
     }
     if (score) {
         newNode.score = score;
+    }
+    if (annotation && !newNode.annotations.includes(annotation)) {
+        newNode.annotations = [...newNode.annotations, annotation];
     }
     return true;
 }

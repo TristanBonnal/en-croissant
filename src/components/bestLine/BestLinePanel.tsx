@@ -2,6 +2,7 @@ import {
   Accordion,
   Alert,
   Button,
+  Checkbox,
   Group,
   Input,
   Loader,
@@ -192,6 +193,24 @@ function BestLinePanel({ id }: { id: string }) {
                   allowNegative={false}
                   value={settings.branchMaxReplies}
                   onChange={(v) => update("branchMaxReplies", Number(v) || 1)}
+                />
+                <Checkbox
+                  mt="md"
+                  label={t("BestLine.TrapBranching")}
+                  description={t("BestLine.TrapBranching.Desc")}
+                  checked={settings.trapBranching}
+                  onChange={(e) => update("trapBranching", e.currentTarget.checked)}
+                />
+                <NumberInput
+                  label={t("BestLine.TrapMinShare")}
+                  description={t("BestLine.TrapMinShare.Desc")}
+                  disabled={!settings.trapBranching}
+                  min={0}
+                  max={100}
+                  suffix="%"
+                  allowNegative={false}
+                  value={Math.round(settings.trapMinShare * 1000) / 10}
+                  onChange={(v) => update("trapMinShare", (Number(v) || 0) / 100)}
                 />
               </>
             )}

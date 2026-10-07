@@ -5,6 +5,7 @@ import { makeFen, parseFen } from "chessops/fen";
 import { makeSanAndPlay, parseSan } from "chessops/san";
 import { z } from "zod";
 import type { BestMoves, Score } from "@/bindings";
+import type { Annotation } from "./annotation";
 import { formatScore, getWinChance, normalizeScore } from "./score";
 
 /** Score gap (as a fraction) under which the move with more games is preferred (raw ranking). */
@@ -28,6 +29,8 @@ export const bestLineSettingsSchema = z.object({
     branchMinShare: z.number().min(0).max(1).default(0.15),
     branchMaxReplies: z.number().int().min(1).default(3),
     branchDepth: z.number().int().min(1).default(1),
+    trapBranching: z.boolean().default(false),
+    trapMinShare: z.number().min(0).max(1).default(0.05),
     toleranceMode: z.enum(["pawns", "winChance"]).default("pawns"),
     engineTolerance: z.number().min(0).default(0.3),
     winChanceTolerance: z.number().min(0).default(3),
@@ -65,9 +68,18 @@ export type Branching = {
     maxReplies: number;
     /** Number of opponent moves that can branch; later ones follow the most played reply. */
     maxDepth: number;
+    /** When set, opponent mistakes played at least this share of the games also get a branch. */
+    trapMinShare?: number;
 };
 
-export type MoveReason = "stats" | "popular" | "engine" | "manual";
+export type MoveReason = "stats" | "popular" | "engine" | "manual" | "trap";
+
+/** Win chance points (%) lost by a dubious move, a mistake and a blunder (as in game reports). */
+const MISTAKE_THRESHOLDS: [number, Annotation][] = [
+    [20, "??"],
+    [10, "?"],
+    [5, "?!"],
+];
 
 export type MoveStats = {
     /** Score of the move for the side playing it: (wins + draws / 2) / games. */
@@ -97,6 +109,8 @@ export type Candidate = {
 export type BestLineNode = MoveChoice & {
     uci: string;
     color: Color;
+    /** "?!", "?" or "??" for an opponent move losing win chances. */
+    annotation?: Annotation;
     /** Position before the move. */
     fen: string;
     candidates: Candidate[];
@@ -125,6 +139,23 @@ export type BestLineDeps = {
     /** Called for each move added to the line. */
     onPosition?: () => void;
 };
+
+/** Annotation of a move that turns the evaluation `before` into `after` for `color`. */
+export function mistakeAnnotation(
+    before: Score,
+    after: Score,
+    color: Color,
+): Annotation | undefined {
+    const lost =
+        getWinChance(normalizeScore(before.value, color)) -
+        getWinChance(normalizeScore(after.value, color));
+    return MISTAKE_THRESHOLDS.find(([threshold]) => lost > threshold)?.[1];
+}
+
+/** An opponent mistake ("?" or "??") worth preparing against. */
+export function isTrap(node: Pick<BestLineNode, "annotation">): boolean {
+    return node.annotation === "?" || node.annotation === "??";
+}
 
 function games(move: { white: number; draws: number; black: number }) {
     return move.white + move.draws + move.black;
@@ -368,7 +399,7 @@ export function lineComment(
     if (node.reason === "stats" && node.stats) {
         return { text: labels.winrate(formatPercent(node.stats.score)), color: "green" };
     }
-    if (node.reason === "popular" && node.stats) {
+    if ((node.reason === "popular" || node.reason === "trap") && node.stats) {
         return { text: labels.played(formatPercent(node.stats.share), node.stats.games) };
     }
     if (node.reason === "engine" && node.score) {
@@ -399,6 +430,7 @@ async function chooseMoves(
     params: BestLineParams,
     deps: BestLineDeps,
     canBranch: boolean,
+    before: Score | undefined,
     forcedMove?: string,
 ): Promise<Choices> {
     const branching = canBranch ? params.branching : { ...params.branching, maxReplies: 1 };
@@ -454,7 +486,18 @@ async function chooseMoves(
         params.minimumGames,
         branching,
     );
-    if (replies.length > 0) return { moves: replies, candidates };
+    if (replies.length > 0) {
+        const traps =
+            canBranch && before && params.branching.trapMinShare !== undefined
+                ? await findTraps(fen, turn, explorer, replies, before, params, deps)
+                : [];
+        return {
+            moves: [...replies, ...traps],
+            candidates: candidates.map((c) =>
+                traps.some((t) => t.san === c.san) ? { ...c, status: "chosen" } : c,
+            ),
+        };
+    }
 
     const lines = await deps.analyze(fen);
     if (lines.length === 0) return { moves: [], candidates: [] };
@@ -476,6 +519,46 @@ async function chooseMoves(
         })),
         evaluation: best.score,
     };
+}
+
+/** Opponent mistakes played often enough to prepare against, besides the chosen replies. */
+async function findTraps(
+    fen: string,
+    turn: Color,
+    explorer: ExplorerPosition,
+    replies: MoveChoice[],
+    before: Score,
+    params: BestLineParams,
+    deps: BestLineDeps,
+): Promise<MoveChoice[]> {
+    const total = games(explorer);
+    const others = [...explorer.moves]
+        .sort((a, b) => games(b) - games(a))
+        .filter(
+            (m) =>
+                !replies.some((r) => sanKey(r.san) === sanKey(m.san)) &&
+                games(m) / total >= (params.branching.trapMinShare ?? 1),
+        );
+    const traps: MoveChoice[] = [];
+    for (const m of others) {
+        if (traps.length >= params.branching.maxReplies || deps.isCancelled?.()) break;
+        const pos = Chess.fromSetup(parseFen(fen).unwrap()).unwrap();
+        const move = parseSan(pos, m.san);
+        if (!move) continue;
+        pos.play(move);
+        const lines = await deps.analyze(makeFen(pos.toSetup()));
+        if (lines.length === 0) continue;
+        const after = bestLine(lines, pos.turn).score;
+        if (isTrap({ annotation: mistakeAnnotation(before, after, turn) })) {
+            traps.push({
+                san: m.san,
+                reason: "trap",
+                score: after,
+                stats: moveStats(m, explorer, turn),
+            });
+        }
+    }
+    return traps;
 }
 
 /**
@@ -508,6 +591,7 @@ export async function findBestLine(
         pos: Chess,
         plies: number,
         opponentMoves: number,
+        positionEval?: Score,
         forcedMove?: string,
     ): Promise<{ nodes: BestLineNode[]; evaluation?: Score }> {
         if (plies <= 0 || cancelled() || pos.isEnd()) return { nodes: [] };
@@ -517,8 +601,11 @@ export async function findBestLine(
         const isOpponent = turn !== params.color;
         const canBranch = opponentMoves < params.branching.maxDepth;
         let choices: Choices;
+        let before = positionEval;
         try {
-            choices = await chooseMoves(fen, turn, params, deps, canBranch, forcedMove);
+            // Opponent moves are judged against the evaluation of the position.
+            if (isOpponent && !before) before = await evaluate(pos);
+            choices = await chooseMoves(fen, turn, params, deps, canBranch, before, forcedMove);
         } catch (e) {
             if (cancelled()) return { nodes: [] };
             throw e;
@@ -544,17 +631,25 @@ export async function findBestLine(
             nodes.push(node);
             deps.onPosition?.();
 
-            const next = await expand(child, plies - 1, opponentMoves + (isOpponent ? 1 : 0));
+            const next = await expand(
+                child,
+                plies - 1,
+                opponentMoves + (isOpponent ? 1 : 0),
+                isOpponent ? undefined : node.score,
+            );
             node.children = next.nodes;
             if (!node.score) {
                 node.score = next.evaluation ?? (await evaluate(child));
+            }
+            if (isOpponent && before && node.score) {
+                node.annotation = mistakeAnnotation(before, node.score, turn);
             }
         }
         return { nodes, evaluation: choices.evaluation };
     }
 
     const pos = Chess.fromSetup(parseFen(params.fen).unwrap()).unwrap();
-    return (await expand(pos, params.plies, 0, params.forcedMove)).nodes;
+    return (await expand(pos, params.plies, 0, undefined, params.forcedMove)).nodes;
 }
 
 /** Retries `fn` when it is rate-limited, waiting `delayMs` before each new try. */

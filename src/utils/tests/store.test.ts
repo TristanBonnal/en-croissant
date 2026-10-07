@@ -605,3 +605,9 @@ test("should handle addTree on existing moves", () => {
     expect(s.root.children).toHaveLength(1);
     expect(getNodeAtPath(s.root, [0]).children).toHaveLength(1);
 });
+
+test("should handle addTree annotations", () => {
+    store.getState().addTree([{ san: "e4", annotation: "?", children: [] }]);
+
+    expect(getNodeAtPath(store.getState().root, [0]).annotations).toStrictEqual(["?"]);
+});

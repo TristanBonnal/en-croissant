@@ -9,8 +9,10 @@ import {
     type ExplorerPosition,
     fenAfter,
     findBestLine,
+    isTrap,
     lineComment,
     mainLine,
+    mistakeAnnotation,
     moveScore,
     nodeAt,
     opponentMovesTo,
@@ -834,4 +836,119 @@ test("opponentMovesTo counts the opponent moves before a node", () => {
 test("sansAlong lists the moves from the first position to a node", () => {
     expect(sansAlong(forest(), [0, 0, 0])).toEqual(["e4", "e5", "Nf3"]);
     expect(sansAlong(forest(), [0, 1])).toEqual(["e4", "c5"]);
+});
+
+// --- traps -------------------------------------------------------------------
+
+test("mistakeAnnotation grades the win chance lost by a move", () => {
+    // From black's point of view: -0.30 -> -3.00 loses about 22 win chance points
+    expect(mistakeAnnotation(cp(30), cp(300), "black")).toBe("??");
+    expect(mistakeAnnotation(cp(30), cp(170), "black")).toBe("?");
+    expect(mistakeAnnotation(cp(30), cp(100), "black")).toBe("?!");
+    expect(mistakeAnnotation(cp(30), cp(40), "black")).toBeUndefined();
+    expect(mistakeAnnotation(cp(-30), cp(-300), "white")).toBe("??");
+});
+
+test("isTrap only keeps real mistakes", () => {
+    expect(isTrap(leaf("e5"))).toBe(false);
+    expect(isTrap({ ...leaf("e5"), annotation: "?!" })).toBe(false);
+    expect(isTrap({ ...leaf("e5"), annotation: "?" })).toBe(true);
+    expect(isTrap({ ...leaf("e5"), annotation: "??" })).toBe(true);
+});
+
+test("findBestLine annotates a popular opponent mistake", async () => {
+    const { deps } = fakeDeps(
+        {
+            [INITIAL_FEN]: [line("e4", "e2e4", 30, 1)],
+            [AFTER_E4_E5]: [line("Nf3", "g1f3", 300, 1)],
+        },
+        {
+            [INITIAL_FEN]: position([move("e4", "e2e4", 500, 100, 400)]),
+            [AFTER_E4]: position([move("e5", "e7e5", 3000, 1000, 3000)]),
+        },
+    );
+    const nodes = await findBestLine(params({ plies: 3 }), deps);
+    const e5 = nodes[0].children[0];
+    expect(e5.annotation).toBe("??");
+    expect(nodes[0].annotation).toBeUndefined();
+});
+
+test("findBestLine evaluates the start position to judge a first opponent move", async () => {
+    const { deps } = fakeDeps(
+        {
+            [AFTER_E4]: [line("c5", "c7c5", 30, 1)],
+            [AFTER_E4_E5]: [line("Nf3", "g1f3", 300, 1)],
+        },
+        { [AFTER_E4]: position([move("e5", "e7e5", 3000, 1000, 3000)]) },
+    );
+    const nodes = await findBestLine(params({ fen: AFTER_E4, plies: 1 }), deps);
+    expect(nodes[0].annotation).toBe("??");
+});
+
+test("findBestLine branches on frequent opponent mistakes below the branching share", async () => {
+    const { deps } = fakeDeps(
+        {
+            [INITIAL_FEN]: [line("e4", "e2e4", 30, 1)],
+            [AFTER_E4_E5]: [line("Nf3", "g1f3", 40, 1)],
+            [AFTER_E4_C5]: [line("Nf3", "g1f3", 300, 1)],
+        },
+        {
+            [INITIAL_FEN]: position([move("e4", "e2e4", 500, 100, 400)]),
+            [AFTER_E4]: position([
+                move("e5", "e7e5", 3000, 1000, 3000),
+                move("c5", "c7c5", 1000, 0, 1000),
+                move("e6", "e7e6", 100, 0, 100),
+            ]),
+        },
+    );
+    const nodes = await findBestLine(
+        params({
+            plies: 2,
+            branching: { minShare: 0.5, maxReplies: 3, maxDepth: 1, trapMinShare: 0.05 },
+        }),
+        deps,
+    );
+    const replies = nodes[0].children;
+    expect(replies.map((n) => [n.san, n.reason])).toEqual([
+        ["e5", "popular"],
+        ["c5", "trap"],
+    ]);
+    expect(replies[1].annotation).toBe("??");
+    expect(replies[1].stats?.share).toBeCloseTo(2000 / 9200);
+});
+
+test("findBestLine does not look for trap branches without the option", async () => {
+    const { deps, analyzed } = fakeDeps(
+        {
+            [INITIAL_FEN]: [line("e4", "e2e4", 30, 1)],
+            [AFTER_E4_C5]: [line("Nf3", "g1f3", 300, 1)],
+        },
+        {
+            [INITIAL_FEN]: position([move("e4", "e2e4", 500, 100, 400)]),
+            [AFTER_E4]: position([
+                move("e5", "e7e5", 3000, 1000, 3000),
+                move("c5", "c7c5", 1000, 0, 1000),
+            ]),
+        },
+    );
+    const nodes = await findBestLine(
+        params({ plies: 2, branching: { minShare: 0.5, maxReplies: 3, maxDepth: 1 } }),
+        deps,
+    );
+    expect(nodes[0].children.map((n) => n.san)).toEqual(["e5"]);
+    expect(analyzed).not.toContain(AFTER_E4_C5);
+});
+
+test("lineComment describes a trap branch by how often it was played", () => {
+    expect(
+        lineComment(
+            node({
+                color: "black",
+                reason: "trap",
+                stats: { score: 0.3, games: 2000, share: 0.217 },
+            }),
+            "white",
+            labels,
+        ),
+    ).toEqual({ text: "21.7% played · 2000 games" });
 });

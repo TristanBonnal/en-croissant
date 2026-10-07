@@ -21,7 +21,7 @@ import { Fragment, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { match } from "ts-pattern";
 import type { BestLineNode, Candidate, CandidateStatus, MoveReason } from "@/utils/bestLine";
-import { formatPercent } from "@/utils/bestLine";
+import { formatPercent, isTrap } from "@/utils/bestLine";
 import { formatNumber } from "@/utils/format";
 import { formatScore } from "@/utils/score";
 
@@ -49,7 +49,24 @@ function flatten(nodes: BestLineNode[], collapsed: Set<string>): Row[] {
 
 function moveLabel(node: BestLineNode) {
   const fullMove = Number(node.fen.split(" ")[5]) || 1;
-  return node.color === "white" ? `${fullMove}. ${node.san}` : `${fullMove}... ${node.san}`;
+  const san = `${node.san}${node.annotation ?? ""}`;
+  return node.color === "white" ? `${fullMove}. ${san}` : `${fullMove}... ${san}`;
+}
+
+function TrapBadge({ node }: { node: BestLineNode }) {
+  const { t } = useTranslation();
+  const refutation = node.children[0]?.san;
+  return (
+    <Tooltip
+      label={
+        refutation ? t("BestLine.Trap.Refutation", { move: refutation }) : t("BestLine.Trap.Desc")
+      }
+    >
+      <Badge size="sm" color="red" variant="filled">
+        {t("BestLine.Trap")}
+      </Badge>
+    </Tooltip>
+  );
 }
 
 function ReasonBadge({ reason }: { reason: MoveReason }) {
@@ -59,6 +76,7 @@ function ReasonBadge({ reason }: { reason: MoveReason }) {
     .with("popular", () => ["gray", t("BestLine.Reason.Popular")])
     .with("engine", () => ["blue", t("BestLine.Reason.Engine")])
     .with("manual", () => ["violet", t("BestLine.Reason.Manual")])
+    .with("trap", () => ["red", t("BestLine.Reason.Trap")])
     .exhaustive();
   return (
     <Badge size="sm" color={color} variant="light">
@@ -94,52 +112,58 @@ function StatsCells({ score, stats }: Pick<Candidate, "score" | "stats">) {
   );
 }
 
-function Alternatives({
+/** Rows of the moves considered instead of `node`, aligned on the table columns. */
+function AlternativeRows({
   node,
+  indent,
   disabled,
   onPlay,
 }: {
   node: BestLineNode;
+  indent: number;
   disabled: boolean;
   onPlay: (san: string) => void;
 }) {
   const { t } = useTranslation();
+  const style = { backgroundColor: "var(--mantine-color-default-hover)" };
   if (node.candidates.length === 0) {
     return (
-      <Text size="xs" c="dimmed">
-        {t("BestLine.NoAlternatives")}
-      </Text>
+      <Table.Tr style={style}>
+        <Table.Td colSpan={7}>
+          <Text size="xs" c="dimmed" pl={`${indent + 1.4}rem`}>
+            {t("BestLine.NoAlternatives")}
+          </Text>
+        </Table.Td>
+      </Table.Tr>
     );
   }
-  return (
-    <Table withRowBorders={false} verticalSpacing={2} fz="xs">
-      <Table.Tbody>
-        {node.candidates.map((c) => (
-          <Table.Tr key={c.san}>
-            <Table.Td>{c.san}</Table.Td>
-            <StatsCells score={c.score} stats={c.stats} />
-            <Table.Td>
-              <StatusBadge status={c.status} />
-            </Table.Td>
-            <Table.Td>
-              {c.san !== node.san && (
-                <Tooltip label={t("BestLine.PlayInstead")}>
-                  <ActionIcon
-                    size="sm"
-                    variant="subtle"
-                    disabled={disabled}
-                    onClick={() => onPlay(c.san)}
-                  >
-                    <IconPlayerPlay size="0.9rem" />
-                  </ActionIcon>
-                </Tooltip>
-              )}
-            </Table.Td>
-          </Table.Tr>
-        ))}
-      </Table.Tbody>
-    </Table>
-  );
+  return node.candidates.map((c) => (
+    <Table.Tr key={c.san} style={style} fz="xs">
+      <Table.Td>
+        <Text size="xs" pl={`${indent + 1.4}rem`}>
+          ↳ {c.san}
+        </Text>
+      </Table.Td>
+      <StatsCells score={c.score} stats={c.stats} />
+      <Table.Td>
+        <StatusBadge status={c.status} />
+      </Table.Td>
+      <Table.Td>
+        {c.san !== node.san && (
+          <Tooltip label={t("BestLine.PlayInstead")}>
+            <ActionIcon
+              size="sm"
+              variant="subtle"
+              disabled={disabled}
+              onClick={() => onPlay(c.san)}
+            >
+              <IconPlayerPlay size="0.9rem" />
+            </ActionIcon>
+          </Tooltip>
+        )}
+      </Table.Td>
+    </Table.Tr>
+  ));
 }
 
 export default function BestLineTable({
@@ -217,7 +241,10 @@ export default function BestLineTable({
                 </Table.Td>
                 <StatsCells score={node.score} stats={node.stats} />
                 <Table.Td>
-                  <ReasonBadge reason={node.reason} />
+                  <Group gap={4} wrap="nowrap">
+                    <ReasonBadge reason={node.reason} />
+                    {isTrap(node) && <TrapBadge node={node} />}
+                  </Group>
                 </Table.Td>
                 <Table.Td>
                   <Menu position="bottom-end" withinPortal>
@@ -254,18 +281,15 @@ export default function BestLineTable({
                 </Table.Td>
               </Table.Tr>
               {expanded === key && (
-                <Table.Tr>
-                  <Table.Td colSpan={7}>
-                    <Alternatives
-                      node={node}
-                      disabled={disabled}
-                      onPlay={(san) => {
-                        setExpanded(null);
-                        onReplay(path, san);
-                      }}
-                    />
-                  </Table.Td>
-                </Table.Tr>
+                <AlternativeRows
+                  node={node}
+                  indent={Math.max(0, level) * 0.9}
+                  disabled={disabled}
+                  onPlay={(san) => {
+                    setExpanded(null);
+                    onReplay(path, san);
+                  }}
+                />
               )}
             </Fragment>
           );
