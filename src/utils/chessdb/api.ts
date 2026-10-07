@@ -101,6 +101,10 @@ type CachedResult = {
 
 const cache = new Map<string, CachedResult[]>();
 
+export function clearChessdbCache() {
+    cache.clear();
+}
+
 async function queryPosition(fen: string) {
     if (cache.has(fen)) {
         return cache.get(fen)!;

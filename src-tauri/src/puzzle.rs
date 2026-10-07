@@ -86,6 +86,12 @@ impl PuzzleCache {
     }
 }
 
+static PUZZLE_CACHE: Lazy<Mutex<PuzzleCache>> = Lazy::new(|| Mutex::new(PuzzleCache::new()));
+
+pub fn clear_puzzle_cache() {
+    *PUZZLE_CACHE.lock().unwrap() = PuzzleCache::new();
+}
+
 #[tauri::command]
 #[specta::specta]
 pub fn get_puzzle(
@@ -94,8 +100,6 @@ pub fn get_puzzle(
     max_rating: u16,
     theme: Option<String>,
 ) -> Result<Puzzle, Error> {
-    static PUZZLE_CACHE: Lazy<Mutex<PuzzleCache>> = Lazy::new(|| Mutex::new(PuzzleCache::new()));
-
     let mut cache = PUZZLE_CACHE.lock().unwrap();
     cache.get_puzzles(&file, min_rating, max_rating, &theme)?;
     cache.get_next_puzzle().ok_or(Error::NoPuzzles)
@@ -162,4 +166,32 @@ pub fn get_themes_for_puzzle(file: String, puzzle_id: i32) -> Result<Vec<String>
         .order(themes::name.asc())
         .load(&mut db)?;
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clear_puzzle_cache_empties_cached_puzzles() {
+        {
+            let mut cache = PUZZLE_CACHE.lock().unwrap();
+            cache.cache.push_back(Puzzle {
+                id: 1,
+                fen: "8/8/8/8/8/8/8/8 w - - 0 1".to_string(),
+                moves: "e2e4".to_string(),
+                rating: 1500,
+                rating_deviation: 80,
+                popularity: 90,
+                nb_plays: 100,
+            });
+            cache.counter = 1;
+        }
+
+        clear_puzzle_cache();
+
+        let cache = PUZZLE_CACHE.lock().unwrap();
+        assert!(cache.cache.is_empty());
+        assert_eq!(cache.counter, 0);
+    }
 }

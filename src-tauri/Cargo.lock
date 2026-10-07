@@ -1407,6 +1407,7 @@ name = "en-croissant"
 version = "0.15.1"
 dependencies = [
  "axum",
+ "block2 0.6.2",
  "btoi",
  "bzip2",
  "chrono",
@@ -1422,6 +1423,8 @@ dependencies = [
  "memmap2",
  "nonzero_ext",
  "oauth2",
+ "objc2-foundation 0.3.2",
+ "objc2-web-kit",
  "once_cell",
  "pgn-reader",
  "polyglot-book-rs",
@@ -1455,6 +1458,9 @@ dependencies = [
  "thiserror 2.0.17",
  "tokio",
  "vampirc-uci",
+ "webkit2gtk",
+ "webview2-com",
+ "windows",
  "zip 2.1.6",
  "zstd",
 ]

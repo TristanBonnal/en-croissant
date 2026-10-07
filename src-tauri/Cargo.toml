@@ -67,6 +67,26 @@ memmap2 = "0.9"
 rkyv = { version = "0.8", features = ["bytecheck"] }
 polyglot-book-rs = "0.1.0"
 
+# Platform webview crates, used to clear only the HTTP cache (cache.rs).
+# Versions must match the ones used by wry so the types line up.
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = { version = "2.0", features = ["v2_16"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+webview2-com = "0.38"
+windows = "0.61"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSDate", "NSSet", "NSString"] }
+objc2-web-kit = { version = "0.3", features = [
+    "block2",
+    "WKWebView",
+    "WKWebViewConfiguration",
+    "WKWebsiteDataRecord",
+    "WKWebsiteDataStore",
+] }
+
 [features]
 # by default Tauri runs in production mode
 # when `tauri dev` runs it is executed with `cargo run --no-default-features` if `devPath` is an URL
