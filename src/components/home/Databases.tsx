@@ -14,40 +14,19 @@ import { useAtomValue } from "jotai";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import useSWRImmutable from "swr/immutable";
-import type { DatabaseInfo as PlainDatabaseInfo, PlayerGameInfo } from "@/bindings";
+import type { DatabaseInfo, PlayerGameInfo } from "@/bindings";
 import { commands, events } from "@/bindings";
 import { sessionsAtom } from "@/state/atoms";
 import { activeDatabaseViewStore } from "@/state/store/database";
 import { error as logError } from "@tauri-apps/plugin-log";
 import { getDatabases, PERSONAL_DATABASES_KEY, PERSONAL_INFO_KEY, query_players } from "@/utils/db";
-import type { Session } from "@/utils/session";
+import { getPlayerDatabases, getSessionUsername, type PersonalDatabase } from "@/utils/session";
 import { unwrap } from "@/utils/unwrap";
 import { DatabaseViewStateContext } from "../databases/DatabaseViewStateContext";
 import PersonalPlayerCard from "./PersonalCard";
 
-type DatabaseInfo = PlainDatabaseInfo & {
-  username?: string;
-};
-
-function getSessionUsername(session: Session): string {
-  const username = session.lichess?.account.username || session.chessCom?.username;
-  if (username === undefined) {
-    throw new Error("Session does not have a username");
-  }
-  return username;
-}
-
-function isDatabaseFromSession(db: DatabaseInfo, sessions: Session[]) {
-  const session = sessions.find((session) => db.filename.includes(getSessionUsername(session)));
-
-  if (session !== undefined) {
-    db.username = getSessionUsername(session);
-  }
-  return session !== undefined;
-}
-
 interface PersonalInfo {
-  db: DatabaseInfo;
+  db: PersonalDatabase;
   info: PlayerGameInfo;
 }
 
@@ -58,18 +37,6 @@ function Databases() {
   const players = Array.from(
     new Set(sessions.map((s) => s.player || s.lichess?.username || s.chessCom?.username || "")),
   );
-  const playerDbNames = players.map((name) => ({
-    name,
-    databases: sessions
-      .filter(
-        (s) => s.player === name || s.lichess?.username === name || s.chessCom?.username === name,
-      )
-      // Must match the title given by AccountCard, which uses lichess' canonical username casing
-      .map((s) =>
-        s.chessCom ? `${s.chessCom.username} Chess.com` : `${s.lichess?.account.username} Lichess`,
-      ),
-  }));
-
   const [name, setName] = useState("");
   useEffect(() => {
     if (sessions.length > 0) {
@@ -79,26 +46,21 @@ function Databases() {
 
   const { data: databases } = useSWRImmutable<DatabaseInfo[]>(
     sessions.length === 0 ? null : [PERSONAL_DATABASES_KEY, sessions],
-    async () => {
-      const dbs = (await getDatabases()).filter((db) => db.type === "success");
-      return dbs.filter((db) => isDatabaseFromSession(db, sessions));
-    },
+    getDatabases,
   );
+  // Part of the stats key so they are reloaded whenever the player's accounts
+  // or their databases change
+  const playerDatabases = databases && name ? getPlayerDatabases(databases, sessions, name) : null;
 
   const {
     data: personalInfo,
     isLoading,
     error,
   } = useSWRImmutable<PersonalInfo[]>(
-    databases && name ? [PERSONAL_INFO_KEY, name, databases] : null,
-    async () => {
-      const playerDbs = playerDbNames.find((p) => p.name === name)?.databases;
-      if (!databases || !playerDbs) return [];
-      const matchingDbs = databases.filter((db) =>
-        playerDbs.includes((db.type === "success" && db.title) || ""),
-      );
+    playerDatabases ? [PERSONAL_INFO_KEY, playerDatabases] : null,
+    async ([, dbs]: [string, PersonalDatabase[]]) => {
       const results = await Promise.allSettled(
-        matchingDbs.map(async (db) => {
+        dbs.map(async (db) => {
           const players = await query_players(db.file, {
             name: db.username,
             options: {
@@ -118,7 +80,7 @@ function Databases() {
       );
       results.forEach((r, i) => {
         if (r.status === "rejected") {
-          logError(`Failed to load personal stats from ${matchingDbs[i].file}: ${r.reason}`);
+          logError(`Failed to load personal stats from ${dbs[i].file}: ${r.reason}`);
         }
       });
       return results
