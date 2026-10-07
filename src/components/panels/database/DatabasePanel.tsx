@@ -9,7 +9,6 @@ import {
   Text,
 } from "@mantine/core";
 import { useDebouncedValue } from "@mantine/hooks";
-import { Link } from "@tanstack/react-router";
 import { useAtom, useAtomValue } from "jotai";
 import { memo, useContext, useEffect } from "react";
 import { useTranslation } from "react-i18next";
@@ -17,7 +16,9 @@ import useSWR from "swr/immutable";
 import { match } from "ts-pattern";
 import { useStore } from "zustand";
 import { commands } from "@/bindings";
+import ExplorerAuthAlert from "@/components/common/ExplorerAuthAlert";
 import { TreeStateContext } from "@/components/common/TreeStateContext";
+import { useExplorerToken } from "@/hooks/useExplorerToken";
 import {
   currentDbTabAtom,
   currentDbTypeAtom,
@@ -26,7 +27,6 @@ import {
   lichessOptionsAtom,
   masterOptionsAtom,
   referenceDbAtom,
-  sessionsAtom,
 } from "@/state/atoms";
 import { getDatabases, type Opening, searchPosition } from "@/utils/db";
 import { formatNumber } from "@/utils/format";
@@ -113,14 +113,12 @@ function DatabasePanel() {
   const store = useContext(TreeStateContext)!;
   const fen = useStore(store, (s) => s.currentNode().fen);
   const [referenceDatabase, setReferenceDatabase] = useAtom(referenceDbAtom);
-  const sessions = useAtomValue(sessionsAtom);
   const [debouncedFen] = useDebouncedValue(fen, 50);
   const [lichessOptions, setLichessOptions] = useAtom(lichessOptionsAtom);
   const [masterOptions, setMasterOptions] = useAtom(masterOptionsAtom);
   const [localOptions, setLocalOptions] = useAtom(currentLocalOptionsAtom);
   const [db, setDb] = useAtom(currentDbTypeAtom);
-  const explorerToken = sessions.find((session) => session.lichess?.accessToken)?.lichess
-    ?.accessToken;
+  const explorerToken = useExplorerToken();
   const missingExplorerToken = db !== "local" && !explorerToken;
 
   const { data: databases } = useSWR(db === "local" ? "databases" : null, () => getDatabases());
@@ -296,18 +294,12 @@ function PanelWithError(props: {
   missingExplorerToken: boolean;
 }) {
   const referenceDatabase = useAtomValue(referenceDbAtom);
-  const { t } = useTranslation();
   let children = props.children;
   if (props.type === "local" && !referenceDatabase) {
     children = <NoDatabaseWarning />;
   }
   if (props.missingExplorerToken && props.type !== "local") {
-    children = (
-      <Alert color="yellow">
-        {t("Board.Database.ExplorerAuthRequired1")} <Link to="/accounts">Users</Link>{" "}
-        {t("Board.Database.ExplorerAuthRequired2")}
-      </Alert>
-    );
+    children = <ExplorerAuthAlert />;
   }
   if (props.error && props.type !== "local") {
     children = <Alert color="red">{props.error.toString()}</Alert>;

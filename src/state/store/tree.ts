@@ -52,6 +52,8 @@ export interface TreeStoreState extends TreeState {
     appendMove: (args: { payload: Move; clock?: number }) => void;
 
     makeMoves: (args: { payload: string[]; mainline?: boolean; changeHeaders?: boolean }) => void;
+    /** Plays `moves` from `from` (default: the current position) and goes to the last one. */
+    addLine: (moves: { san: string; comment?: string; score?: Score }[], from?: number[]) => void;
     deleteMove: (path?: number[]) => void;
     promoteVariation: (path: number[]) => void;
     promoteToMainline: (path: number[]) => void;
@@ -234,6 +236,30 @@ export const createTreeStore = (id?: string, initialTree?: TreeState) => {
                             sound: i === payload.length - 1,
                             changeHeaders,
                         });
+                    }
+                }),
+            ),
+        addLine: (moves, from) =>
+            set(
+                produce((state) => {
+                    state.dirty = true;
+                    if (from) {
+                        state.position = [...from];
+                    }
+                    for (const [i, { san, comment, score }] of moves.entries()) {
+                        const node = getNodeAtPath(state.root, state.position);
+                        const [pos] = positionFromFen(node.fen);
+                        if (!pos) return;
+                        const move = parseSan(pos, san);
+                        if (!move) return;
+                        makeMove({ state, move, last: false, sound: i === moves.length - 1 });
+                        const newNode = getNodeAtPath(state.root, state.position);
+                        if (comment && !newNode.comment) {
+                            newNode.comment = comment;
+                        }
+                        if (score) {
+                            newNode.score = score;
+                        }
                     }
                 }),
             ),

@@ -1,7 +1,7 @@
 import { parseUci } from "chessops";
 import { beforeEach, expect, test } from "vitest";
 import { createTreeStore } from "@/state/store/tree";
-import { defaultTree, type TreeState } from "@/utils/treeReducer";
+import { defaultTree, getNodeAtPath, type TreeState } from "@/utils/treeReducer";
 
 const store = createTreeStore();
 
@@ -508,4 +508,62 @@ test("should handle promoteVariation", () => {
             ],
         },
     });
+});
+
+test("should handle addLine", () => {
+    const score = { value: { type: "cp" as const, value: 30 }, wdl: null };
+    store.getState().addLine([
+        { san: "e4", comment: "first", score },
+        { san: "d5", comment: "second" },
+    ]);
+
+    const s = store.getState();
+    expect(s.dirty).toBe(true);
+    expect(s.position).toStrictEqual([0, 0]);
+    const e4Node = getNodeAtPath(s.root, [0]);
+    expect(e4Node.san).toBe("e4");
+    expect(e4Node.comment).toBe("first");
+    expect(e4Node.score).toStrictEqual(score);
+    const d5Node = getNodeAtPath(s.root, [0, 0]);
+    expect(d5Node.san).toBe("d5");
+    expect(d5Node.comment).toBe("second");
+    expect(d5Node.score).toBeNull();
+});
+
+test("should handle addLine reusing existing moves and adding a variation", () => {
+    store.setState({ ...treeE4D5(), position: [] });
+    store.getState().setComment("unused");
+    store.setState({ position: [0] });
+    store.getState().setComment("mine");
+    store.setState({ position: [] });
+
+    store.getState().addLine([
+        { san: "e4", comment: "generated" },
+        { san: "e5", comment: "reply" },
+    ]);
+
+    const s = store.getState();
+    expect(s.position).toStrictEqual([0, 1]);
+    expect(getNodeAtPath(s.root, [0]).comment).toBe("mine");
+    expect(getNodeAtPath(s.root, [0, 0]).san).toBe("d5");
+    expect(getNodeAtPath(s.root, [0, 1]).san).toBe("e5");
+    expect(getNodeAtPath(s.root, [0, 1]).comment).toBe("reply");
+});
+
+test("should stop addLine at the first illegal move", () => {
+    store.getState().addLine([{ san: "e4" }, { san: "e4" }, { san: "d5" }]);
+
+    const s = store.getState();
+    expect(s.position).toStrictEqual([0]);
+    expect(getNodeAtPath(s.root, [0]).children).toStrictEqual([]);
+});
+
+test("should handle addLine from a given path", () => {
+    store.setState({ ...treeE4D5(), position: [0, 0] });
+
+    store.getState().addLine([{ san: "e5" }], [0]);
+
+    const s = store.getState();
+    expect(s.position).toStrictEqual([0, 1]);
+    expect(getNodeAtPath(s.root, [0, 1]).san).toBe("e5");
 });

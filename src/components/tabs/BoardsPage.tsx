@@ -15,6 +15,8 @@ import { unwrap } from "@/utils/unwrap";
 import BoardAnalysis from "../boards/BoardAnalysis";
 import BoardGame from "../boards/BoardGame";
 import { TreeStateProvider } from "../common/TreeStateContext";
+import BestLine from "../bestLine/BestLine";
+import { cancelBestLine } from "../bestLine/runner";
 import Puzzles from "../puzzles/Puzzles";
 import { BoardTab } from "./BoardTab";
 import ConfirmChangesModal from "./ConfirmChangesModal";
@@ -66,6 +68,7 @@ export default function BoardsPage() {
           }
         }
         setTabs((prev) => prev.filter((tab) => tab.value !== value));
+        cancelBestLine(value);
         unwrap(await commands.killEngines(value));
         await commands.abortGame(`${value}-game`);
       }
@@ -341,6 +344,22 @@ function TabSwitch({
           resize={{ minimumPaneSizePercentage: 0 }}
         />
         <Puzzles id={tab.value} />
+      </TreeStateProvider>
+    ))
+    .with("bestLine", () => (
+      <TreeStateProvider id={tab.value}>
+        <Mosaic<ViewId>
+          renderTile={(id) => fullLayout[id]}
+          value={windowsState.currentNode}
+          onChange={(currentNode) => setWindowsState({ currentNode })}
+          resize={{ minimumPaneSizePercentage: 0 }}
+        />
+        <BestLine id={tab.value} />
+        <ConfirmChangesModal
+          opened={saveModalOpened}
+          toggle={toggleSaveModal}
+          closeTab={() => closeTab(activeTab, true)}
+        />
       </TreeStateProvider>
     ))
     .exhaustive();

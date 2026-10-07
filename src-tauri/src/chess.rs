@@ -543,18 +543,7 @@ pub async fn analyze_game(
         )?;
 
         let mut extra_options = uci_options.clone();
-        if !extra_options.iter().any(|x| x.name == "MultiPV") {
-            extra_options.push(EngineOption {
-                name: "MultiPV".to_string(),
-                value: "2".to_string(),
-            });
-        } else {
-            extra_options.iter_mut().for_each(|x| {
-                if x.name == "MultiPV" {
-                    x.value = "2".to_string();
-                }
-            });
-        }
+        set_multipv(&mut extra_options, 2);
 
         proc.set_options(EngineOptions {
             fen: options.fen.clone(),
@@ -565,36 +554,17 @@ pub async fn analyze_game(
 
         proc.go(&go_mode).await?;
 
-        let mut current_analysis = MoveAnalysis::default();
-        while let Ok(Some(line)) = reader.next_line().await {
-            match parse_one(&line) {
-                UciMessage::Info(attrs) => {
-                    if let Ok(best_moves) =
-                        parse_uci_attrs(attrs, &proc.options.fen.parse()?, moves)
-                    {
-                        let multipv = best_moves.multipv;
-                        let cur_depth = best_moves.depth;
-                        if multipv as usize == proc.best_moves.len() + 1 {
-                            proc.best_moves.push(best_moves);
-                            if multipv == proc.real_multipv {
-                                if proc.best_moves.iter().all(|x| x.depth == cur_depth)
-                                    && cur_depth >= proc.last_depth
-                                {
-                                    current_analysis.best = proc.best_moves.clone();
-                                    proc.last_depth = cur_depth;
-                                }
-                                assert_eq!(proc.best_moves.len(), proc.real_multipv as usize);
-                                proc.best_moves.clear();
-                            }
-                        }
-                    }
-                }
-                UciMessage::BestMove { .. } => {
-                    break;
-                }
-                _ => {}
+        let best = match search_until_bestmove(&mut proc, &mut reader, moves, &cancel_flag).await {
+            Err(Error::AnalysisCancelled) => {
+                state.analysis_cancel_flags.remove(&id);
+                return Err(Error::AnalysisCancelled);
             }
-        }
+            result => result?,
+        };
+        let current_analysis = MoveAnalysis {
+            best,
+            ..Default::default()
+        };
         analysis.push(current_analysis);
     }
 
@@ -631,6 +601,95 @@ pub async fn analyze_game(
     update_progress(&state.progress_state, &app, id.clone(), 100.0, true)?;
     state.analysis_cancel_flags.remove(&id);
     Ok(analysis)
+}
+
+fn set_multipv(options: &mut Vec<EngineOption>, multipv: u16) {
+    let value = multipv.to_string();
+    match options.iter_mut().find(|x| x.name == "MultiPV") {
+        Some(option) => option.value = value,
+        None => options.push(EngineOption {
+            name: "MultiPV".to_string(),
+            value,
+        }),
+    }
+}
+
+/// Reads engine output until `bestmove` and returns the last complete set of
+/// MultiPV lines. Kills the engine if `cancel_flag` is raised meanwhile.
+async fn search_until_bestmove(
+    proc: &mut EngineProcess,
+    reader: &mut EngineReader,
+    moves: &[String],
+    cancel_flag: &AtomicBool,
+) -> Result<Vec<BestMoves>, Error> {
+    let fen: Fen = proc.options.fen.parse()?;
+    let mut best = Vec::new();
+    while let Ok(Some(line)) = reader.next_line().await {
+        if cancel_flag.load(Ordering::SeqCst) {
+            proc.kill().await?;
+            return Err(Error::AnalysisCancelled);
+        }
+        match parse_one(&line) {
+            UciMessage::Info(attrs) => {
+                if let Ok(best_moves) = parse_uci_attrs(attrs, &fen, moves) {
+                    let multipv = best_moves.multipv;
+                    let cur_depth = best_moves.depth;
+                    if multipv as usize == proc.best_moves.len() + 1 {
+                        proc.best_moves.push(best_moves);
+                        if multipv == proc.real_multipv {
+                            if proc.best_moves.iter().all(|x| x.depth == cur_depth)
+                                && cur_depth >= proc.last_depth
+                            {
+                                best = proc.best_moves.clone();
+                                proc.last_depth = cur_depth;
+                            }
+                            proc.best_moves.clear();
+                        }
+                    }
+                }
+            }
+            UciMessage::BestMove { .. } => break,
+            _ => {}
+        }
+    }
+    Ok(best)
+}
+
+#[tauri::command]
+#[specta::specta]
+#[allow(clippy::too_many_arguments)]
+pub async fn analyze_position(
+    id: String,
+    engine: String,
+    go_mode: GoMode,
+    fen: String,
+    moves: Vec<String>,
+    multipv: u16,
+    uci_options: Vec<EngineOption>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<BestMoves>, Error> {
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    state
+        .analysis_cancel_flags
+        .insert(id.clone(), cancel_flag.clone());
+
+    let result = async {
+        let (mut proc, mut reader) = EngineProcess::new(PathBuf::from(&engine)).await?;
+        let mut extra_options = uci_options;
+        set_multipv(&mut extra_options, multipv);
+        proc.set_options(EngineOptions {
+            fen,
+            moves: moves.clone(),
+            extra_options,
+        })
+        .await?;
+        proc.go(&go_mode).await?;
+        search_until_bestmove(&mut proc, &mut reader, &moves, &cancel_flag).await
+    }
+    .await;
+
+    state.analysis_cancel_flags.remove(&id);
+    result
 }
 
 fn count_material(position: &Chess) -> i32 {
@@ -716,6 +775,27 @@ mod tests {
     fn pos(fen: &str) -> Chess {
         let fen: Fen = fen.parse().unwrap();
         Chess::from_setup(fen.into_setup(), CastlingMode::Chess960).unwrap()
+    }
+
+    fn opt(name: &str, value: &str) -> EngineOption {
+        EngineOption {
+            name: name.to_string(),
+            value: value.to_string(),
+        }
+    }
+
+    #[test]
+    fn set_multipv_adds_missing_option() {
+        let mut options = vec![opt("Threads", "4")];
+        set_multipv(&mut options, 5);
+        assert_eq!(options, vec![opt("Threads", "4"), opt("MultiPV", "5")]);
+    }
+
+    #[test]
+    fn set_multipv_replaces_existing_option() {
+        let mut options = vec![opt("MultiPV", "1"), opt("Hash", "64")];
+        set_multipv(&mut options, 2);
+        assert_eq!(options, vec![opt("MultiPV", "2"), opt("Hash", "64")]);
     }
 
     #[test]

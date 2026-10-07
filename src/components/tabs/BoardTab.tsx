@@ -6,6 +6,7 @@ import {
   IconDatabase,
   IconEdit,
   IconPuzzle,
+  IconRoute,
   IconX,
   IconZoomCheck,
 } from "@tabler/icons-react";
@@ -132,6 +133,9 @@ export function BoardTab({
 function TabIcon({ tab, tabType }: { tab: Tab; tabType: string }) {
   if (tabType === "puzzles") {
     return <IconPuzzle size="0.875rem" />;
+  }
+  if (tabType === "bestLine") {
+    return <IconRoute size="0.875rem" />;
   }
   if (tabType === "play") {
     return <IconChess size="0.875rem" />;

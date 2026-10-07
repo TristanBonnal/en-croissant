@@ -19,7 +19,7 @@ import { capitalize } from "@/utils/format";
 import { MIN_DATE } from "@/utils/lichess/api";
 import type { LichessGameSpeed, LichessRating } from "@/utils/lichess/explorer";
 
-const LichessOptionsPanel = () => {
+const LichessOptionsPanel = ({ hidePlayer = false }: { hidePlayer?: boolean }) => {
   const { t } = useTranslation();
 
   const [options, setOptions] = useAtom(lichessOptionsAtom);
@@ -135,25 +135,27 @@ const LichessOptionsPanel = () => {
           clearable
         />
       </Group>
-      <Group grow>
-        <TextInput
-          label="Player"
-          placeholder="Player's username"
-          value={options.player ?? ""}
-          onChange={(e) => setOptions({ ...options, player: e.currentTarget.value })}
-        />
-        <Select
-          label="Color"
-          placeholder="Select color"
-          data={[
-            { label: "White", value: "white" },
-            { label: "Black", value: "black" },
-          ]}
-          value={options.color}
-          onChange={(v) => setOptions({ ...options, color: v as "white" | "black" })}
-          clearable={false}
-        />
-      </Group>
+      {!hidePlayer && (
+        <Group grow>
+          <TextInput
+            label="Player"
+            placeholder="Player's username"
+            value={options.player ?? ""}
+            onChange={(e) => setOptions({ ...options, player: e.currentTarget.value })}
+          />
+          <Select
+            label="Color"
+            placeholder="Select color"
+            data={[
+              { label: "White", value: "white" },
+              { label: "Black", value: "black" },
+            ]}
+            value={options.color}
+            onChange={(v) => setOptions({ ...options, color: v as "white" | "black" })}
+            clearable={false}
+          />
+        </Group>
+      )}
     </Stack>
   );
 };

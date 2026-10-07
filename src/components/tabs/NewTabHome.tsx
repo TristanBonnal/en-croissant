@@ -33,6 +33,7 @@ import {
   IconClock,
   IconFileImport,
   IconPuzzle,
+  IconRoute,
   IconTarget,
   IconTargetArrow,
 } from "@tabler/icons-react";
@@ -241,6 +242,21 @@ export default function NewTabHome({ id }: { id: string }) {
         });
       },
     },
+    {
+      icon: <IconRoute size={60} />,
+      title: t("Home.Card.BestLine.Title"),
+      description: t("Home.Card.BestLine.Desc"),
+      label: t("Home.Card.BestLine.Button"),
+      onClick: () => {
+        setTabs((prev) => {
+          const tab = prev.find((t) => t.value === id);
+          if (!tab) return prev;
+          tab.name = t("BestLine.Title");
+          tab.type = "bestLine";
+          return [...prev];
+        });
+      },
+    },
   ];
 
   return (
@@ -253,7 +269,7 @@ export default function NewTabHome({ id }: { id: string }) {
       />
       <CreateRepertoireModal opened={openRepertoireModal} setOpened={setOpenRepertoireModal} />
       <Stack gap="lg" pt="sm">
-        <SimpleGrid cols={{ base: 1, sm: 2, lg: 5 }}>
+        <SimpleGrid cols={{ base: 1, sm: 2, lg: 3, xl: 6 }}>
           {cards.map((card) => (
             <Card shadow="sm" p="lg" radius="md" withBorder key={card.title}>
               <Stack align="center" h="100%" justify="space-between">

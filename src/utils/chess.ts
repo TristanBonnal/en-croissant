@@ -17,6 +17,7 @@ import {
     type TreeState,
 } from "./treeReducer";
 import { unwrap } from "./unwrap";
+import { stripCommentColors } from "./commentColor";
 
 export interface BestMoves {
     depth: number;
@@ -115,7 +116,7 @@ export function getMoveText(
         }
 
         if (opt.comments && tree.comment !== "") {
-            content += tree.comment;
+            content += stripCommentColors(tree.comment);
         }
         content += "} ";
 

@@ -71,14 +71,16 @@ function BoardControls({
       orientation: orientation === "black" ? "white" : "black",
     });
 
+  const isPlaying = currentTab?.type === "play";
+
   function changeTabType() {
     setCurrentTab((t) => {
-      if (t.type === "analysis") {
+      if (t.type !== "play") {
         setGameState("settingUp");
       }
       return {
         ...t,
-        type: t.type === "analysis" ? "play" : "analysis",
+        type: t.type === "play" ? "analysis" : "play",
       };
     });
   }
@@ -122,18 +124,10 @@ function BoardControls({
       )}
       <Tooltip
         position="right"
-        label={t(
-          currentTab?.type === "analysis"
-            ? "Board.Action.PlayFromHere"
-            : "Board.Action.AnalyzeGame",
-        )}
+        label={t(isPlaying ? "Board.Action.AnalyzeGame" : "Board.Action.PlayFromHere")}
       >
         <ActionIcon onClick={changeTabType}>
-          {currentTab?.type === "analysis" ? (
-            <IconTarget size="1.2rem" />
-          ) : (
-            <IconZoomCheck size="1.2rem" />
-          )}
+          {isPlaying ? <IconZoomCheck size="1.2rem" /> : <IconTarget size="1.2rem" />}
         </ActionIcon>
       </Tooltip>
       {!eraseDrawablesOnClick && (

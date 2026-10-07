@@ -58,7 +58,7 @@ const gameOriginSchema = z.discriminatedUnion("kind", [
 export const tabSchema = z.object({
     name: z.string(),
     value: z.string(),
-    type: z.enum(["new", "play", "analysis", "puzzles"]),
+    type: z.enum(["new", "play", "analysis", "puzzles", "bestLine"]),
     gameOrigin: gameOriginSchema,
 });
 

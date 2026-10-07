@@ -7,7 +7,6 @@ import {
   IconTargetArrow,
   IconZoomCheck,
 } from "@tabler/icons-react";
-import { useLoaderData } from "@tanstack/react-router";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
 import type { Piece } from "chessops";
 import { useAtom, useAtomValue } from "jotai";
@@ -16,7 +15,6 @@ import { useTranslation } from "react-i18next";
 import { useStore } from "zustand";
 import {
   allEnabledAtom,
-  autoSaveAtom,
   currentAnalysisTabAtom,
   currentPracticeTabAtom,
   currentReportModalOpenAtom,
@@ -27,7 +25,8 @@ import {
 } from "@/state/atoms";
 import { keyMapAtom } from "@/state/keybinds";
 import { defaultPGN } from "@/utils/chess";
-import { getTabFile, saveToFile } from "@/utils/tabs";
+import { useSaveFile } from "@/hooks/useSaveFile";
+import { getTabFile } from "@/utils/tabs";
 import DetachedEval from "../common/DetachedEval";
 import GameNotation from "../common/GameNotation";
 import MoveControls from "../common/MoveControls";
@@ -49,41 +48,15 @@ function BoardAnalysis() {
   const [selectedPiece, setSelectedPiece] = useState<Piece | null>(null);
   const [currentTab, setCurrentTab] = useAtom(currentTabAtom);
   const tabFile = getTabFile(currentTab);
-  const hasPersistentOrigin = currentTab?.gameOrigin.kind !== "none";
-  const autoSave = useAtomValue(autoSaveAtom);
-  const { documentDir } = useLoaderData({ from: "/" });
   const boardRef = useRef(null);
 
   const store = useContext(TreeStateContext)!;
 
-  const dirty = useStore(store, (s) => s.dirty);
+  const { dirty, userSaveFile } = useSaveFile();
 
   const reset = useStore(store, (s) => s.reset);
   const clearShapes = useStore(store, (s) => s.clearShapes);
   const setAnnotation = useStore(store, (s) => s.setAnnotation);
-
-  const saveFile = useCallback(async () => {
-    saveToFile({
-      dir: documentDir,
-      setCurrentTab,
-      tab: currentTab,
-      store,
-    });
-  }, [setCurrentTab, currentTab, documentDir, store]);
-  const userSaveFile = useCallback(async () => {
-    saveToFile({
-      dir: documentDir,
-      setCurrentTab,
-      tab: currentTab,
-      store,
-      isUserSave: true,
-    });
-  }, [setCurrentTab, currentTab, documentDir, store]);
-  useEffect(() => {
-    if (hasPersistentOrigin && autoSave && dirty) {
-      saveFile();
-    }
-  }, [hasPersistentOrigin, saveFile, autoSave, dirty]);
 
   const addGame = useCallback(() => {
     if (!tabFile) return;

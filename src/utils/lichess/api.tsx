@@ -189,7 +189,7 @@ export async function convertToNormalized(data: PositionGames): Promise<Normaliz
     .map((r) => (r as PromiseFulfilledResult<NormalizedGame>).value);
 }
 
-type PositionData = {
+export type PositionData = {
   white: number;
   black: number;
   draws: number;
