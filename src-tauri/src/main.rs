@@ -3,6 +3,7 @@
     windows_subsystem = "windows"
 )]
 
+mod cache;
 mod chess;
 mod db;
 mod engine;
@@ -119,6 +120,7 @@ fn main() {
             get_engine_logs,
             memory_size,
             get_puzzle,
+            cache::clear_app_caches,
             search_opening_name,
             get_opening_from_fen,
             get_opening_from_fens,

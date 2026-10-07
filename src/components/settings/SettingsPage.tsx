@@ -64,6 +64,7 @@ import {
 import { keyMapAtom } from "@/state/keybinds";
 import FileInput from "../common/FileInput";
 import BoardSelect from "./BoardSelect";
+import ClearCacheButton from "./ClearCacheButton";
 import ColorControl from "./ColorControl";
 import FontSizeSlider from "./FontSizeSlider";
 import KeybindInput from "./KeybindInput";
@@ -614,6 +615,14 @@ export default function Page() {
             filename={puzzlesDirectory || null}
           />
         ),
+      },
+      {
+        id: "clear-cache",
+        category: "directories",
+        title: t("Settings.Directories.ClearCache"),
+        description: t("Settings.Directories.ClearCache.Desc"),
+        keywords: ["cache", "clear", "reset", "index", "troubleshoot"],
+        render: () => <ClearCacheButton />,
       },
       // Privacy settings
       {

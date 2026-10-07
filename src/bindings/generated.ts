@@ -80,6 +80,18 @@ async getPuzzle(file: string, minRating: number, maxRating: number, theme: strin
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Clears every cache of the app (backend memory, search indexes, webview HTTP
+ * cache) without touching user data such as settings stored in localStorage.
+ */
+async clearAppCaches(databasesDir: string) : Promise<Result<ClearCachesResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("clear_app_caches", { databasesDir }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async searchOpeningName(query: string) : Promise<Result<OutOpening[], string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("search_opening_name", { query }) };
@@ -490,6 +502,7 @@ progressEvent: "progress-event"
 export type AnalysisOptions = { fen: string; moves: string[]; annotateNovelties: boolean; referenceDb: string | null; reversed: boolean }
 export type BestMoves = { nodes: number; depth: number; score: Score; uciMoves: string[]; sanMoves: string[]; multipv: number; nps: number }
 export type BestMovesPayload = { bestLines: BestMoves[]; engine: string; tab: string; fen: string; moves: string[]; progress: number }
+export type ClearCachesResult = { removedIndexes: number; failedIndexes: number; webviewCleared: boolean }
 export type ClockUpdateEvent = { gameId: string; whiteTime: bigint | null; blackTime: bigint | null }
 export type DatabaseInfo = { title: string; description: string; player_count: number; event_count: number; game_count: number; storage_size: bigint; filename: string; indexed: boolean }
 export type DatabaseProgress = { id: string; progress: number }

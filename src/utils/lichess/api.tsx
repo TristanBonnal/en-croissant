@@ -288,6 +288,10 @@ export async function getBestMoves(
 
 const cache = new Map<string, LichessCloudData>();
 
+export function clearLichessCloudCache() {
+  cache.clear();
+}
+
 type LichessCloudData = {
   fen: string;
   knodes: number;
