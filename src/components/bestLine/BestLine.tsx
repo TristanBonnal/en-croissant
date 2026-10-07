@@ -4,6 +4,7 @@ import type { Piece } from "chessops";
 import { useAtomValue } from "jotai";
 import { useContext, useEffect, useRef, useState } from "react";
 import { useStore } from "zustand";
+import { useOpenInAnalysis } from "@/hooks/useOpenInAnalysis";
 import { useSaveFile } from "@/hooks/useSaveFile";
 import { keyMapAtom } from "@/state/keybinds";
 import Board from "../boards/Board";
@@ -24,6 +25,7 @@ function BestLine({ id }: { id: string }) {
   const clearShapes = useStore(store, (s) => s.clearShapes);
   const { dirty, userSaveFile } = useSaveFile();
   const keyMap = useAtomValue(keyMapAtom);
+  const openInAnalysis = useOpenInAnalysis("BestLine.Title");
 
   useEffect(() => registerTreeStore(id, store), [id, store]);
 
@@ -58,6 +60,7 @@ function BestLine({ id }: { id: string }) {
                   toggleEditingMode={toggleEditingMode}
                   dirty={dirty}
                   saveFile={userSaveFile}
+                  onOpenInAnalysis={openInAnalysis}
                 />
               }
             />

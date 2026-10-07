@@ -53,7 +53,9 @@ export interface TreeStoreState extends TreeState {
 
     makeMoves: (args: { payload: string[]; mainline?: boolean; changeHeaders?: boolean }) => void;
     /** Plays `moves` from `from` (default: the current position) and goes to the last one. */
-    addLine: (moves: { san: string; comment?: string; score?: Score }[], from?: number[]) => void;
+    addLine: (moves: LineMove[], from?: number[]) => void;
+    /** Plays a tree of moves from `from` (default: the current position) and goes to the end of its main line. */
+    addTree: (moves: TreeMove[], from?: number[]) => void;
     deleteMove: (path?: number[]) => void;
     promoteVariation: (path: number[]) => void;
     promoteToMainline: (path: number[]) => void;
@@ -246,21 +248,17 @@ export const createTreeStore = (id?: string, initialTree?: TreeState) => {
                     if (from) {
                         state.position = [...from];
                     }
-                    for (const [i, { san, comment, score }] of moves.entries()) {
-                        const node = getNodeAtPath(state.root, state.position);
-                        const [pos] = positionFromFen(node.fen);
-                        if (!pos) return;
-                        const move = parseSan(pos, san);
-                        if (!move) return;
-                        makeMove({ state, move, last: false, sound: i === moves.length - 1 });
-                        const newNode = getNodeAtPath(state.root, state.position);
-                        if (comment && !newNode.comment) {
-                            newNode.comment = comment;
-                        }
-                        if (score) {
-                            newNode.score = score;
-                        }
+                    for (const [i, move] of moves.entries()) {
+                        if (!playLineMove(state, move, i === moves.length - 1)) return;
                     }
+                }),
+            ),
+        addTree: (moves, from) =>
+            set(
+                produce((state) => {
+                    state.dirty = true;
+                    const start = from ?? state.position;
+                    state.position = insertTree(state, moves, [...start]) ?? [...start];
                 }),
             ),
         goToEnd: () =>
@@ -550,6 +548,40 @@ export const createTreeStore = (id?: string, initialTree?: TreeState) => {
 
     return createStore<TreeStoreState>()(stateCreator);
 };
+
+export type LineMove = { san: string; comment?: string; score?: Score };
+export type TreeMove = LineMove & { children: TreeMove[] };
+
+/** Plays `move` from the current position; sets its comment (if it has none) and score. */
+function playLineMove(state: TreeState, { san, comment, score }: LineMove, sound: boolean) {
+    const node = getNodeAtPath(state.root, state.position);
+    const [pos] = positionFromFen(node.fen);
+    if (!pos) return false;
+    const move = parseSan(pos, san);
+    if (!move) return false;
+    makeMove({ state, move, last: false, sound });
+    const newNode = getNodeAtPath(state.root, state.position);
+    if (comment && !newNode.comment) {
+        newNode.comment = comment;
+    }
+    if (score) {
+        newNode.score = score;
+    }
+    return true;
+}
+
+/** Inserts `moves` under `from` and returns the path of the end of their main line. */
+function insertTree(state: TreeState, moves: TreeMove[], from: number[]): number[] | null {
+    let mainEnd: number[] | null = null;
+    for (const move of moves) {
+        state.position = [...from];
+        if (!playLineMove(state, move, false)) continue;
+        const here = [...state.position];
+        const end = insertTree(state, move.children, here) ?? here;
+        mainEnd ??= end;
+    }
+    return mainEnd;
+}
 
 function makeMove({
     state,

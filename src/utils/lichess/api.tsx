@@ -323,6 +323,15 @@ async function getCloudEvaluation(fen: string, multipv: number): Promise<Lichess
   return data;
 }
 
+export class LichessHttpError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
 export async function getLichessGames(
   fen: string,
   options: LichessGamesOptions,
@@ -344,7 +353,10 @@ export async function getLichessGames(
     ),
   });
   if (!res.ok) {
-    throw new Error(`Failed to fetch Lichess games: ${res.status} ${res.statusText}`);
+    throw new LichessHttpError(
+      `Failed to fetch Lichess games: ${res.status} ${res.statusText}`,
+      res.status,
+    );
   }
   return await res.json();
 }

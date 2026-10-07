@@ -655,6 +655,20 @@ async fn search_until_bestmove(
     Ok(best)
 }
 
+/// Engine kept alive between the `analyze_position` calls of a same search, so
+/// it is spawned once and keeps its hash table.
+pub struct AnalysisSession {
+    engine: String,
+    proc: EngineProcess,
+    reader: EngineReader,
+}
+
+impl AnalysisSession {
+    pub fn kill_sync(&mut self) {
+        self.proc.kill_sync();
+    }
+}
+
 #[tauri::command]
 #[specta::specta]
 #[allow(clippy::too_many_arguments)]
@@ -673,8 +687,26 @@ pub async fn analyze_position(
         .analysis_cancel_flags
         .insert(id.clone(), cancel_flag.clone());
 
+    let existing = state.analysis_sessions.get(&id).map(|s| s.clone());
+    let session = match existing {
+        Some(session) if session.lock().await.engine == engine => session,
+        _ => {
+            let (proc, reader) = EngineProcess::new(PathBuf::from(&engine)).await?;
+            let session = Arc::new(Mutex::new(AnalysisSession {
+                engine: engine.clone(),
+                proc,
+                reader,
+            }));
+            if let Some(old) = state.analysis_sessions.insert(id.clone(), session.clone()) {
+                old.lock().await.proc.kill().await?;
+            }
+            session
+        }
+    };
+
     let result = async {
-        let (mut proc, mut reader) = EngineProcess::new(PathBuf::from(&engine)).await?;
+        let mut session = session.lock().await;
+        let AnalysisSession { proc, reader, .. } = &mut *session;
         let mut extra_options = uci_options;
         set_multipv(&mut extra_options, multipv);
         proc.set_options(EngineOptions {
@@ -684,12 +716,28 @@ pub async fn analyze_position(
         })
         .await?;
         proc.go(&go_mode).await?;
-        search_until_bestmove(&mut proc, &mut reader, &moves, &cancel_flag).await
+        search_until_bestmove(proc, reader, &moves, &cancel_flag).await
     }
     .await;
 
     state.analysis_cancel_flags.remove(&id);
+    if result.is_err() {
+        state.analysis_sessions.remove(&id);
+    }
     result
+}
+
+/// Stops the engine of an `analyze_position` search.
+#[tauri::command]
+#[specta::specta]
+pub async fn close_analysis_session(
+    id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), Error> {
+    if let Some((_, session)) = state.analysis_sessions.remove(&id) {
+        session.lock().await.proc.kill().await?;
+    }
+    Ok(())
 }
 
 fn count_material(position: &Chess) -> i32 {

@@ -18,7 +18,7 @@ import type { BestMoves, GoMode } from "@/bindings";
 import { DEFAULT_TIME_CONTROL, type OpponentSettings } from "@/components/boards/OpponentForm";
 import { type Position, positionSchema } from "@/components/files/opening";
 import type { LocalOptions } from "@/components/panels/database/DatabasePanel";
-import { type BestLineSettings, type BestLineStep, bestLineSettingsSchema } from "@/utils/bestLine";
+import { type BestLineNode, type BestLineSettings, bestLineSettingsSchema } from "@/utils/bestLine";
 import { positionFromFen, swapMove } from "@/utils/chessops";
 import type { SuccessDatabaseInfo } from "@/utils/db";
 import { type Engine, type EngineSettings, engineSchema } from "@/utils/engines";
@@ -412,26 +412,43 @@ export const bestLineSettingsAtom = atomWithStorage<BestLineSettings>(
     },
 );
 
-export type BestLineRun = { running: boolean; progress: number; error: string | null };
+export type BestLineRun = {
+    running: boolean;
+    /** Percentage for a single line search, null when the number of positions is unknown. */
+    progress: number | null;
+    positions: number;
+    /** Time until which the search waits for the Lichess rate limit. */
+    waitingUntil: number | null;
+    error: string | null;
+};
 
 /** Progress of the "find the best line" search of a tab (kept while switching tabs). */
 export const bestLineRunFamily = atomFamily((_tab: string) =>
-    atom<BestLineRun>({ running: false, progress: 0, error: null }),
+    atom<BestLineRun>({
+        running: false,
+        progress: null,
+        positions: 0,
+        waitingUntil: null,
+        error: null,
+    }),
 );
 
 export type BestLineResult = {
     fen: string;
     color: "white" | "black";
+    /** Path of the start position in the tab's move tree. */
     startPath: number[];
-    steps: BestLineStep[];
-    /** Whether the line was added to the tab's move tree. */
+    nodes: BestLineNode[];
+    /** Whether the result was added to the tab's move tree. */
     inserted: boolean;
+    /** Path (in `nodes`) of the branch to show once inserted. */
+    focus: number[];
 };
 
 /** Last "find the best line" result of a tab, kept until the next search. */
 export const bestLineResultFamily = atomFamily((tab: string) =>
     atomWithStorage<BestLineResult | null>(
-        `${tab}-best-line`,
+        `${tab}-best-line-result`,
         null,
         createJSONStorage(() => sessionStorage),
         { getOnInit: true },

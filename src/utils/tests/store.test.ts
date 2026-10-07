@@ -567,3 +567,41 @@ test("should handle addLine from a given path", () => {
     expect(s.position).toStrictEqual([0, 1]);
     expect(getNodeAtPath(s.root, [0, 1]).san).toBe("e5");
 });
+
+test("should handle addTree", () => {
+    store.setState({ ...treeE4D5(), position: [0, 0] });
+
+    store.getState().addTree(
+        [
+            {
+                san: "e5",
+                comment: "main",
+                children: [
+                    { san: "Nf3", children: [] },
+                    { san: "Bc4", comment: "alt", children: [] },
+                ],
+            },
+        ],
+        [0],
+    );
+
+    const s = store.getState();
+    expect(s.dirty).toBe(true);
+    expect(s.position).toStrictEqual([0, 1, 0]);
+    const e5 = getNodeAtPath(s.root, [0, 1]);
+    expect(e5.san).toBe("e5");
+    expect(e5.comment).toBe("main");
+    expect(e5.children.map((c) => c.san)).toStrictEqual(["Nf3", "Bc4"]);
+    expect(e5.children[1].comment).toBe("alt");
+});
+
+test("should handle addTree on existing moves", () => {
+    store.setState({ ...treeE4D5(), position: [] });
+
+    store.getState().addTree([{ san: "e4", children: [{ san: "d5", children: [] }] }]);
+
+    const s = store.getState();
+    expect(s.position).toStrictEqual([0, 0]);
+    expect(s.root.children).toHaveLength(1);
+    expect(getNodeAtPath(s.root, [0]).children).toHaveLength(1);
+});

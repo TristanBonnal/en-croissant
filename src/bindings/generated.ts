@@ -37,6 +37,17 @@ async analyzePosition(id: string, engine: string, goMode: GoMode, fen: string, m
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Stops the engine of an `analyze_position` search.
+ */
+async closeAnalysisSession(id: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("close_analysis_session", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async cancelAnalysis(id: string) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cancel_analysis", { id }) };

@@ -36,6 +36,7 @@ interface BoardControlsProps {
   onTakeBack?: () => void;
   disableVariations?: boolean;
   allowEditing?: boolean;
+  onOpenInAnalysis?: () => void;
 }
 
 function BoardControls({
@@ -47,6 +48,7 @@ function BoardControls({
   onTakeBack,
   disableVariations,
   allowEditing,
+  onOpenInAnalysis,
 }: BoardControlsProps) {
   const { t } = useTranslation();
   const { documentDir } = useLoaderData({ from: "/" });
@@ -130,6 +132,13 @@ function BoardControls({
           {isPlaying ? <IconZoomCheck size="1.2rem" /> : <IconTarget size="1.2rem" />}
         </ActionIcon>
       </Tooltip>
+      {onOpenInAnalysis && (
+        <Tooltip position="right" label={t("Board.Action.OpenInAnalysis")}>
+          <ActionIcon onClick={() => onOpenInAnalysis()}>
+            <IconZoomCheck size="1.2rem" />
+          </ActionIcon>
+        </Tooltip>
+      )}
       {!eraseDrawablesOnClick && (
         <Tooltip position="right" label={t("Board.Action.ClearDrawings")}>
           <ActionIcon onClick={() => clearShapes()}>

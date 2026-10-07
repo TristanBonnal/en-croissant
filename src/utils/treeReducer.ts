@@ -169,6 +169,20 @@ export function getGameName(headers: GameHeaders) {
     return "Unknown";
 }
 
+/** Path reached by playing `sans` from the node at `from`, or null if a move isn't in the tree. */
+export function findPathBySans(root: TreeNode, from: number[], sans: string[]): number[] | null {
+    const strip = (san: string) => san.replace(/[+#]/g, "");
+    let node = getNodeAtPath(root, from);
+    const path = [...from];
+    for (const san of sans) {
+        const index = node.children.findIndex((c) => c.san && strip(c.san) === strip(san));
+        if (index === -1) return null;
+        path.push(index);
+        node = node.children[index];
+    }
+    return path;
+}
+
 export const getNodeAtPath = (node: TreeNode, path: number[]): TreeNode => {
     let currentNode = node;
     for (const index of path) {

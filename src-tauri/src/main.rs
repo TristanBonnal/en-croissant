@@ -38,8 +38,8 @@ use tauri::{Manager, Window};
 use tauri_plugin_log::{Target, TargetKind};
 
 use crate::chess::{
-    analyze_game, analyze_position, cancel_analysis, get_engine_config, get_engine_logs,
-    kill_engine, kill_engines, stop_engine,
+    analyze_game, analyze_position, cancel_analysis, close_analysis_session, get_engine_config,
+    get_engine_logs, kill_engine, kill_engines, stop_engine, AnalysisSession,
 };
 use crate::db::{
     clear_games, convert_pgn, create_indexes, delete_database, delete_db_game, delete_empty_games,
@@ -91,6 +91,7 @@ pub struct AppState {
 
     engine_processes: DashMap<(String, String), Arc<tokio::sync::Mutex<EngineProcess>>>,
     analysis_cancel_flags: DashMap<String, Arc<AtomicBool>>,
+    analysis_sessions: DashMap<String, Arc<tokio::sync::Mutex<AnalysisSession>>>,
     auth: AuthState,
     game_manager: GameManager,
     progress_state: ProgressStore,
@@ -114,6 +115,7 @@ fn main() {
             get_best_moves,
             analyze_game,
             analyze_position,
+            close_analysis_session,
             cancel_analysis,
             stop_engine,
             kill_engine,
@@ -256,6 +258,11 @@ fn main() {
                 for entry in state.engine_processes.iter() {
                     if let Ok(mut process) = entry.value().try_lock() {
                         process.kill_sync();
+                    }
+                }
+                for entry in state.analysis_sessions.iter() {
+                    if let Ok(mut session) = entry.value().try_lock() {
+                        session.kill_sync();
                     }
                 }
             }

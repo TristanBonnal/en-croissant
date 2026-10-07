@@ -1,5 +1,6 @@
 import { mutate } from "swr";
 import { type ClearCachesResult, commands } from "@/bindings";
+import { clearBestLineCaches } from "@/utils/bestLineCache";
 import { clearChessdbCache } from "@/utils/chessdb/api";
 import { getDatabasesDir } from "@/utils/directories";
 import { clearLichessCloudCache } from "@/utils/lichess/api";
@@ -13,6 +14,7 @@ export async function clearAppCaches(): Promise<ClearCachesResult> {
     const result = unwrap(await commands.clearAppCaches(await getDatabasesDir()));
     clearLichessCloudCache();
     clearChessdbCache();
+    clearBestLineCaches();
     await mutate((key) => !(Array.isArray(key) && key[0] === MENU_KEY), undefined, {
         revalidate: true,
     });

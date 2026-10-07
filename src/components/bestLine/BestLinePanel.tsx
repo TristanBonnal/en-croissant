@@ -1,26 +1,30 @@
 import {
   Accordion,
   Alert,
-  Badge,
   Button,
   Group,
   Input,
+  Loader,
   NumberInput,
   Paper,
   Progress,
   ScrollArea,
   SegmentedControl,
+  Select,
   SimpleGrid,
   Stack,
-  Table,
   Text,
 } from "@mantine/core";
-import { IconPlayerPlay, IconPlayerStop, IconZoomCheck } from "@tabler/icons-react";
-import { useNavigate } from "@tanstack/react-router";
-import { useAtom, useAtomValue, useSetAtom } from "jotai";
+import { useDisclosure } from "@mantine/hooks";
+import {
+  IconBookmarkPlus,
+  IconPlayerPlay,
+  IconPlayerStop,
+  IconZoomCheck,
+} from "@tabler/icons-react";
+import { useAtom, useAtomValue } from "jotai";
 import { useContext, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
-import { match } from "ts-pattern";
 import { useStore } from "zustand";
 import { EnginesSelect } from "@/components/boards/EnginesSelect";
 import ExplorerAuthAlert from "@/components/common/ExplorerAuthAlert";
@@ -28,54 +32,27 @@ import { TreeStateContext } from "@/components/common/TreeStateContext";
 import LichessOptionsPanel from "@/components/panels/database/options/LichessOptionsPanel";
 import FenInput from "@/components/panels/info/FenInput";
 import { useExplorerToken } from "@/hooks/useExplorerToken";
+import { useOpenInAnalysis } from "@/hooks/useOpenInAnalysis";
 import {
-  activeTabAtom,
   bestLineResultFamily,
   bestLineRunFamily,
   bestLineSettingsAtom,
   enginesAtom,
   lichessOptionsAtom,
-  tabsAtom,
 } from "@/state/atoms";
-import { type BestLineStep, formatPercent, type MoveReason } from "@/utils/bestLine";
-import { getPGN } from "@/utils/chess";
 import type { LocalEngine } from "@/utils/engines";
-import { formatNumber } from "@/utils/format";
-import { formatScore } from "@/utils/score";
-import { createTab } from "@/utils/tabs";
-import { cancelBestLine, startBestLine } from "./runner";
+import AddToRepertoireModal from "./AddToRepertoireModal";
+import BestLineTable from "./BestLineTable";
+import {
+  cancelBestLine,
+  extendLine,
+  goToResultMove,
+  replayMove,
+  type SearchConfig,
+  startBestLine,
+} from "./runner";
 
 const EXPLORER_MOVES = 30;
-
-function moveLabels(fen: string, steps: BestLineStep[]) {
-  let fullMove = Number(fen.split(" ")[5]) || 1;
-  return steps.map((step) => {
-    const label = step.color === "white" ? `${fullMove}.` : `${fullMove}...`;
-    if (step.color === "black") fullMove++;
-    return label;
-  });
-}
-
-function ReasonBadge({ reason }: { reason: MoveReason }) {
-  const { t } = useTranslation();
-  return match(reason)
-    .with("stats", () => (
-      <Badge size="sm" color="green" variant="light">
-        {t("BestLine.Reason.Stats")}
-      </Badge>
-    ))
-    .with("popular", () => (
-      <Badge size="sm" color="gray" variant="light">
-        {t("BestLine.Reason.Popular")}
-      </Badge>
-    ))
-    .with("engine", () => (
-      <Badge size="sm" color="blue" variant="light">
-        {t("BestLine.Reason.Engine")}
-      </Badge>
-    ))
-    .exhaustive();
-}
 
 function BestLinePanel({ id }: { id: string }) {
   const { t } = useTranslation();
@@ -92,37 +69,23 @@ function BestLinePanel({ id }: { id: string }) {
     previousOrientation.current = orientation;
     setSettings((prev) => (prev.color === orientation ? prev : { ...prev, color: orientation }));
   }, [orientation, setSettings]);
+
   const lichessOptions = useAtomValue(lichessOptionsAtom);
   const engines = useAtomValue(enginesAtom);
   const localEngines = (engines ?? []).filter((e): e is LocalEngine => e.type === "local");
   const engine = localEngines.find((e) => e.id === settings.engine) ?? null;
   const explorerToken = useExplorerToken();
 
-  const setTabs = useSetAtom(tabsAtom);
-  const setActiveTab = useSetAtom(activeTabAtom);
-  const navigate = useNavigate();
+  const openInAnalysis = useOpenInAnalysis("BestLine.Title");
 
-  const { running, progress, error } = useAtomValue(bestLineRunFamily(id));
+  const { running, progress, positions, waitingUntil, error } = useAtomValue(bestLineRunFamily(id));
   const result = useAtomValue(bestLineResultFamily(id));
+  const [repertoireOpened, repertoireModal] = useDisclosure(false);
 
-  function run() {
-    if (!engine) return;
-    startBestLine({
-      tab: id,
-      params: {
-        fen: currentFen,
-        color: settings.color,
-        fullMoves: settings.fullMoves,
-        tolerance: settings.engineTolerance,
-        minimumGames: settings.minimumGames,
-        minGamesPerMove: settings.minGamesPerMove,
-      },
-      engine: engine.path,
-      engineOptions: (engine.settings ?? []).map((s) => ({
-        ...s,
-        value: s.value?.toString() ?? "",
-      })),
-      depth: settings.depth,
+  const config = (): SearchConfig | null =>
+    engine && {
+      settings,
+      engine,
       explorerOptions: {
         ...lichessOptions,
         player: undefined,
@@ -131,30 +94,13 @@ function BestLinePanel({ id }: { id: string }) {
         moves: EXPLORER_MOVES,
       },
       token: explorerToken,
-    });
+    };
+
+  function update<K extends keyof typeof settings>(key: K, value: (typeof settings)[K]) {
+    setSettings((prev) => ({ ...prev, [key]: value }));
   }
 
-  async function openInAnalysis() {
-    const { root, headers, position } = store.getState();
-    const pgn = getPGN(root, {
-      headers,
-      comments: true,
-      extraMarkups: true,
-      glyphs: true,
-      variations: true,
-    });
-    await createTab({
-      tab: { name: t("BestLine.Title"), type: "analysis" },
-      setTabs,
-      setActiveTab,
-      pgn,
-      headers,
-      position,
-    });
-    navigate({ to: "/" });
-  }
-
-  const labels = result ? moveLabels(result.fen, result.steps) : [];
+  const canRun = !!engine && !!explorerToken && !running;
 
   return (
     <Paper withBorder h="100%" p="md">
@@ -167,26 +113,36 @@ function BestLinePanel({ id }: { id: string }) {
             {t("BestLine.Desc")}
           </Text>
 
-          <Input.Wrapper label={t("BestLine.Color")}>
-            <SegmentedControl
-              fullWidth
-              value={settings.color}
-              onChange={(v) => setSettings((prev) => ({ ...prev, color: v as "white" | "black" }))}
-              data={[
-                { label: t("Fen.White"), value: "white" },
-                { label: t("Fen.Black"), value: "black" },
-              ]}
-            />
-          </Input.Wrapper>
+          <SimpleGrid cols={2}>
+            <Input.Wrapper label={t("BestLine.Color")}>
+              <SegmentedControl
+                fullWidth
+                value={settings.color}
+                onChange={(v) => update("color", v as "white" | "black")}
+                data={[
+                  { label: t("Fen.White"), value: "white" },
+                  { label: t("Fen.Black"), value: "black" },
+                ]}
+              />
+            </Input.Wrapper>
+            <Input.Wrapper label={t("BestLine.Mode")}>
+              <SegmentedControl
+                fullWidth
+                value={settings.mode}
+                onChange={(v) => update("mode", v as "line" | "tree")}
+                data={[
+                  { label: t("BestLine.Mode.Line"), value: "line" },
+                  { label: t("BestLine.Mode.Tree"), value: "tree" },
+                ]}
+              />
+            </Input.Wrapper>
+          </SimpleGrid>
 
           {localEngines.length === 0 ? (
             <Alert color="yellow">{t("Board.Analysis.EngineRequired")}</Alert>
           ) : (
             <Input.Wrapper label={t("Common.Engine")}>
-              <EnginesSelect
-                engine={engine}
-                setEngine={(e) => setSettings((prev) => ({ ...prev, engine: e?.id ?? "" }))}
-              />
+              <EnginesSelect engine={engine} setEngine={(e) => update("engine", e?.id ?? "")} />
             </Input.Wrapper>
           )}
 
@@ -197,7 +153,7 @@ function BestLinePanel({ id }: { id: string }) {
               allowDecimal={false}
               allowNegative={false}
               value={settings.depth}
-              onChange={(v) => setSettings((prev) => ({ ...prev, depth: Number(v) || 1 }))}
+              onChange={(v) => update("depth", Number(v) || 1)}
             />
             <NumberInput
               label={t("BestLine.FullMoves")}
@@ -205,29 +161,89 @@ function BestLinePanel({ id }: { id: string }) {
               allowDecimal={false}
               allowNegative={false}
               value={settings.fullMoves}
-              onChange={(v) => setSettings((prev) => ({ ...prev, fullMoves: Number(v) || 1 }))}
+              onChange={(v) => update("fullMoves", Number(v) || 1)}
             />
-            <NumberInput
-              label={t("BestLine.Tolerance")}
-              description={t("BestLine.Tolerance.Desc")}
-              min={0}
-              step={0.05}
-              decimalScale={2}
-              allowNegative={false}
-              value={settings.engineTolerance}
-              onChange={(v) =>
-                setSettings((prev) => ({ ...prev, engineTolerance: Number(v) || 0 }))
-              }
+            {settings.mode === "tree" && (
+              <>
+                <NumberInput
+                  label={t("BestLine.BranchMinShare")}
+                  description={t("BestLine.BranchMinShare.Desc")}
+                  min={0}
+                  max={100}
+                  suffix="%"
+                  allowNegative={false}
+                  value={Math.round(settings.branchMinShare * 1000) / 10}
+                  onChange={(v) => update("branchMinShare", (Number(v) || 0) / 100)}
+                />
+                <NumberInput
+                  label={t("BestLine.BranchDepth")}
+                  description={t("BestLine.BranchDepth.Desc")}
+                  min={1}
+                  allowDecimal={false}
+                  allowNegative={false}
+                  value={settings.branchDepth}
+                  onChange={(v) => update("branchDepth", Number(v) || 1)}
+                />
+                <NumberInput
+                  label={t("BestLine.BranchMaxReplies")}
+                  description={t("BestLine.BranchMaxReplies.Desc")}
+                  min={1}
+                  allowDecimal={false}
+                  allowNegative={false}
+                  value={settings.branchMaxReplies}
+                  onChange={(v) => update("branchMaxReplies", Number(v) || 1)}
+                />
+              </>
+            )}
+            <Select
+              label={t("BestLine.ToleranceMode")}
+              allowDeselect={false}
+              value={settings.toleranceMode}
+              onChange={(v) => update("toleranceMode", v as "pawns" | "winChance")}
+              data={[
+                { label: t("BestLine.ToleranceMode.Pawns"), value: "pawns" },
+                { label: t("BestLine.ToleranceMode.WinChance"), value: "winChance" },
+              ]}
             />
-            <NumberInput
-              label={t("BestLine.MinimumGames")}
-              description={t("BestLine.MinimumGames.Desc")}
-              min={0}
-              allowDecimal={false}
-              allowNegative={false}
-              thousandSeparator=" "
-              value={settings.minimumGames}
-              onChange={(v) => setSettings((prev) => ({ ...prev, minimumGames: Number(v) || 0 }))}
+            {settings.toleranceMode === "pawns" ? (
+              <NumberInput
+                label={t("BestLine.Tolerance")}
+                description={t("BestLine.Tolerance.Desc")}
+                min={0}
+                step={0.05}
+                decimalScale={2}
+                allowNegative={false}
+                value={settings.engineTolerance}
+                onChange={(v) => update("engineTolerance", Number(v) || 0)}
+              />
+            ) : (
+              <NumberInput
+                label={t("BestLine.Tolerance")}
+                description={t("BestLine.WinChanceTolerance.Desc")}
+                min={0}
+                max={100}
+                step={0.5}
+                decimalScale={1}
+                suffix="%"
+                allowNegative={false}
+                value={settings.winChanceTolerance}
+                onChange={(v) => update("winChanceTolerance", Number(v) || 0)}
+              />
+            )}
+            <Select
+              label={t("BestLine.Ranking")}
+              description={t(
+                settings.ranking === "wilson"
+                  ? "BestLine.Ranking.Wilson.Desc"
+                  : "BestLine.Ranking.Raw.Desc",
+              )}
+              allowDeselect={false}
+              value={settings.ranking}
+              onChange={(v) => update("ranking", v as "wilson" | "raw")}
+              data={[
+                { label: t("BestLine.Ranking.Wilson"), value: "wilson" },
+                { label: t("BestLine.Ranking.Raw"), value: "raw" },
+              ]}
             />
             <NumberInput
               label={t("BestLine.MinGamesPerMove")}
@@ -237,9 +253,17 @@ function BestLinePanel({ id }: { id: string }) {
               allowNegative={false}
               thousandSeparator=" "
               value={settings.minGamesPerMove}
-              onChange={(v) =>
-                setSettings((prev) => ({ ...prev, minGamesPerMove: Number(v) || 0 }))
-              }
+              onChange={(v) => update("minGamesPerMove", Number(v) || 0)}
+            />
+            <NumberInput
+              label={t("BestLine.MinimumGames")}
+              description={t("BestLine.MinimumGames.Desc")}
+              min={0}
+              allowDecimal={false}
+              allowNegative={false}
+              thousandSeparator=" "
+              value={settings.minimumGames}
+              onChange={(v) => update("minimumGames", Number(v) || 0)}
             />
           </SimpleGrid>
 
@@ -278,60 +302,81 @@ function BestLinePanel({ id }: { id: string }) {
             ) : (
               <Button
                 leftSection={<IconPlayerPlay size="1rem" />}
-                disabled={!engine || !explorerToken}
-                onClick={run}
+                disabled={!canRun}
+                onClick={() => {
+                  const c = config();
+                  if (c) startBestLine(id, c);
+                }}
               >
                 {t("BestLine.Run")}
               </Button>
             )}
-            {result && result.steps.length > 0 && !running && (
-              <Button
-                variant="default"
-                leftSection={<IconZoomCheck size="1rem" />}
-                onClick={openInAnalysis}
-              >
-                {t("BestLine.OpenInAnalysis")}
-              </Button>
+            {result && result.nodes.length > 0 && !running && (
+              <>
+                <Button
+                  variant="default"
+                  leftSection={<IconBookmarkPlus size="1rem" />}
+                  onClick={repertoireModal.open}
+                >
+                  {t("BestLine.Repertoire.Add")}
+                </Button>
+                <Button
+                  variant="default"
+                  leftSection={<IconZoomCheck size="1rem" />}
+                  onClick={openInAnalysis}
+                >
+                  {t("BestLine.OpenInAnalysis")}
+                </Button>
+              </>
             )}
           </Group>
-          {running && <Progress value={progress} animated />}
+          {running && (
+            <Stack gap={4}>
+              {progress !== null ? (
+                <Progress value={progress} animated />
+              ) : (
+                <Group gap="xs">
+                  <Loader size="xs" />
+                  <Text size="sm" c="dimmed">
+                    {t("BestLine.Positions", { positions })}
+                  </Text>
+                </Group>
+              )}
+              {waitingUntil && (
+                <Text size="sm" c="orange">
+                  {t("BestLine.RateLimited")}
+                </Text>
+              )}
+            </Stack>
+          )}
 
-          {result && result.steps.length === 0 && (
+          {result && result.nodes.length === 0 && (
             <Text size="sm" c="dimmed">
               {t("BestLine.NoMoves")}
             </Text>
           )}
-          {result && result.steps.length > 0 && (
-            <Table striped>
-              <Table.Thead>
-                <Table.Tr>
-                  <Table.Th>{t("BestLine.Table.Move")}</Table.Th>
-                  <Table.Th>{t("BestLine.Table.Eval")}</Table.Th>
-                  <Table.Th>{t("BestLine.Table.Score")}</Table.Th>
-                  <Table.Th>{t("BestLine.Table.Share")}</Table.Th>
-                  <Table.Th>{t("Common.Games")}</Table.Th>
-                  <Table.Th>{t("BestLine.Table.Reason")}</Table.Th>
-                </Table.Tr>
-              </Table.Thead>
-              <Table.Tbody>
-                {result.steps.map((step, i) => (
-                  <Table.Tr key={i}>
-                    <Table.Td>
-                      <Text size="sm" fw={step.color === result.color ? "bold" : undefined}>
-                        {labels[i]} {step.san}
-                      </Text>
-                    </Table.Td>
-                    <Table.Td>{step.score ? formatScore(step.score.value) : "-"}</Table.Td>
-                    <Table.Td>{step.stats ? formatPercent(step.stats.score) : "-"}</Table.Td>
-                    <Table.Td>{step.stats ? formatPercent(step.stats.share) : "-"}</Table.Td>
-                    <Table.Td>{step.stats ? formatNumber(step.stats.games) : "-"}</Table.Td>
-                    <Table.Td>
-                      <ReasonBadge reason={step.reason} />
-                    </Table.Td>
-                  </Table.Tr>
-                ))}
-              </Table.Tbody>
-            </Table>
+          {result && result.nodes.length > 0 && (
+            <BestLineTable
+              nodes={result.nodes}
+              color={result.color}
+              disabled={!canRun}
+              onSelect={(path) => goToResultMove(id, path)}
+              onReplay={(path, san) => {
+                const c = config();
+                if (c) replayMove(id, c, path, san);
+              }}
+              onExtend={(path, fullMoves) => {
+                const c = config();
+                if (c) extendLine(id, c, path, fullMoves);
+              }}
+            />
+          )}
+          {result && (
+            <AddToRepertoireModal
+              opened={repertoireOpened}
+              onClose={repertoireModal.close}
+              result={result}
+            />
           )}
         </Stack>
       </ScrollArea>
