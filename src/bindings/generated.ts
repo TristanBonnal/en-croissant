@@ -29,9 +29,9 @@ async analyzeGame(id: string, engine: string, goMode: GoMode, options: AnalysisO
     else return { status: "error", error: e  as any };
 }
 },
-async analyzePosition(id: string, engine: string, goMode: GoMode, fen: string, moves: string[], multipv: number, uciOptions: EngineOption[]) : Promise<Result<BestMoves[], string>> {
+async analyzePosition(id: string, engine: string, goMode: GoMode, fen: string, moves: string[], multipv: number, searchMoves: string[], uciOptions: EngineOption[]) : Promise<Result<BestMoves[], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("analyze_position", { id, engine, goMode, fen, moves, multipv, uciOptions }) };
+    return { status: "ok", data: await TAURI_INVOKE("analyze_position", { id, engine, goMode, fen, moves, multipv, searchMoves, uciOptions }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };

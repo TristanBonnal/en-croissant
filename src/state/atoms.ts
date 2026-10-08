@@ -18,7 +18,12 @@ import type { BestMoves, GoMode } from "@/bindings";
 import { DEFAULT_TIME_CONTROL, type OpponentSettings } from "@/components/boards/OpponentForm";
 import { type Position, positionSchema } from "@/components/files/opening";
 import type { LocalOptions } from "@/components/panels/database/DatabasePanel";
-import { type BestLineNode, type BestLineSettings, bestLineSettingsSchema } from "@/utils/bestLine";
+import {
+    type AnalysisPurpose,
+    type BestLineNode,
+    type BestLineSettings,
+    bestLineSettingsSchema,
+} from "@/utils/bestLine";
 import { positionFromFen, swapMove } from "@/utils/chessops";
 import type { SuccessDatabaseInfo } from "@/utils/db";
 import { type Engine, type EngineSettings, engineSchema } from "@/utils/engines";
@@ -412,6 +417,41 @@ export const bestLineSettingsAtom = atomWithStorage<BestLineSettings>(
     },
 );
 
+/** Where the time of a search went (analyses served by the cloud or the local engine). */
+export type SearchReport = {
+    seconds: number;
+    /** Moves added to the result. */
+    moves: number;
+    /** Depths the fast and precise analyses ran at. */
+    fastDepth: number;
+    preciseDepth: number;
+    /** Analyses reused from the session cache (same position, depth and lines). */
+    cached: number;
+    /** Analyses served by the Lichess cloud evaluation instead of the local engine. */
+    cloud: number;
+    /** Local engine analyses, by what the search needed them for. */
+    engine: Record<AnalysisPurpose, number>;
+    engineSeconds: number;
+    /** Explorer requests sent to Lichess (cache misses). */
+    explorer: number;
+    explorerSeconds: number;
+    /** Positions the search opened. */
+    expanded: number;
+    /** Candidates dropped because they could not catch up. */
+    pruned: number;
+    /** Replies left closed because a game reaches them too rarely. */
+    lowReach: number;
+    /** Positions the explorer knows too little about. */
+    outOfBook: number;
+    /** Share of the games the tree accounts for. */
+    coverage: number;
+    /** Positions checked again at the precise depth, and choices it changed. */
+    checked: number;
+    changed: number;
+    /** Whether the search stopped on its last-resort limit. */
+    exhausted: boolean;
+};
+
 export type BestLineRun = {
     running: boolean;
     /** Percentage for a single line search, null when the number of positions is unknown. */
@@ -420,22 +460,32 @@ export type BestLineRun = {
     /** Time until which the search waits for the Lichess rate limit. */
     waitingUntil: number | null;
     error: string | null;
+    report: SearchReport | null;
+};
+
+/** State of a tab with no search running nor run yet. */
+export const idleBestLineRun: BestLineRun = {
+    running: false,
+    progress: null,
+    positions: 0,
+    waitingUntil: null,
+    error: null,
+    report: null,
 };
 
 /** Progress of the "find the best line" search of a tab (kept while switching tabs). */
-export const bestLineRunFamily = atomFamily((_tab: string) =>
-    atom<BestLineRun>({
-        running: false,
-        progress: null,
-        positions: 0,
-        waitingUntil: null,
-        error: null,
-    }),
+export const bestLineRunFamily = atomFamily((_tab: string) => atom<BestLineRun>(idleBestLineRun));
+
+/** Sub-tab shown in the "find the best line" panel of a tab. */
+export const bestLinePanelTabFamily = atomFamily((_tab: string) =>
+    atom<"settings" | "result">("settings"),
 );
 
 export type BestLineResult = {
     fen: string;
     color: "white" | "black";
+    /** How move results were measured (missing in results of older versions). */
+    metric?: "wins" | "score";
     /** Path of the start position in the tab's move tree. */
     startPath: number[];
     nodes: BestLineNode[];

@@ -146,7 +146,15 @@ function AlternativeRows({
       </Table.Td>
       <StatsCells score={c.score} stats={c.stats} />
       <Table.Td>
-        <StatusBadge status={c.status} />
+        {c.value !== undefined ? (
+          <Tooltip label={t("BestLine.Value", { value: formatPercent(c.value) })}>
+            <Box>
+              <StatusBadge status={c.status} />
+            </Box>
+          </Tooltip>
+        ) : (
+          <StatusBadge status={c.status} />
+        )}
       </Table.Td>
       <Table.Td>
         {c.san !== node.san && (
@@ -169,6 +177,7 @@ function AlternativeRows({
 export default function BestLineTable({
   nodes,
   color,
+  metric,
   disabled,
   onSelect,
   onReplay,
@@ -176,6 +185,7 @@ export default function BestLineTable({
 }: {
   nodes: BestLineNode[];
   color: "white" | "black";
+  metric: "wins" | "score";
   disabled: boolean;
   onSelect: (path: number[]) => void;
   onReplay: (path: number[], san: string) => void;
@@ -202,7 +212,9 @@ export default function BestLineTable({
         <Table.Tr>
           <Table.Th>{t("BestLine.Table.Move")}</Table.Th>
           <Table.Th>{t("BestLine.Table.Eval")}</Table.Th>
-          <Table.Th>{t("BestLine.Table.Score")}</Table.Th>
+          <Table.Th>
+            {t(metric === "wins" ? "BestLine.Table.Winrate" : "BestLine.Table.Score")}
+          </Table.Th>
           <Table.Th>{t("BestLine.Table.Share")}</Table.Th>
           <Table.Th>{t("Common.Games")}</Table.Th>
           <Table.Th>{t("BestLine.Table.Reason")}</Table.Th>

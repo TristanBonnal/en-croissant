@@ -67,7 +67,7 @@ export default function AddToRepertoireModal({
       const where = await addToRepertoire(file, {
         rootFen: root.fen,
         prefix: sansAlong(root, result.startPath),
-        moves: toTreeMoves(result.nodes, result.color),
+        moves: toTreeMoves(result.nodes, result.color, result.metric),
       });
       mutate((key) => Array.isArray(key) && key[0] === "file-directory");
       notifications.show({

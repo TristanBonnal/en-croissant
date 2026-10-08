@@ -11,7 +11,10 @@ use vampirc_uci::UciMessage;
 
 use crate::error::Error;
 
-use super::{normalize_uci_moves_for_fen, types::GoMode};
+use super::{
+    normalize_uci_moves_for_fen,
+    types::{go_command, GoMode},
+};
 
 #[cfg(target_os = "windows")]
 pub const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -138,7 +141,11 @@ impl BaseEngine {
     }
 
     pub async fn go(&mut self, mode: &GoMode) -> Result<(), Error> {
-        let cmd = mode.to_uci_string();
+        self.go_search(mode, &[]).await
+    }
+
+    pub async fn go_search(&mut self, mode: &GoMode, search_moves: &[String]) -> Result<(), Error> {
+        let cmd = go_command(mode, search_moves);
         self.send(&cmd).await
     }
 

@@ -127,8 +127,12 @@ impl EngineProcess {
     }
 
     async fn go(&mut self, mode: &GoMode) -> Result<(), Error> {
+        self.go_search(mode, &[]).await
+    }
+
+    async fn go_search(&mut self, mode: &GoMode, search_moves: &[String]) -> Result<(), Error> {
         self.go_mode = mode.clone();
-        self.base.go(mode).await?;
+        self.base.go_search(mode, search_moves).await?;
         self.running = true;
         self.start = Instant::now();
         Ok(())
@@ -679,6 +683,7 @@ pub async fn analyze_position(
     fen: String,
     moves: Vec<String>,
     multipv: u16,
+    search_moves: Vec<String>,
     uci_options: Vec<EngineOption>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<BestMoves>, Error> {
@@ -715,7 +720,7 @@ pub async fn analyze_position(
             extra_options,
         })
         .await?;
-        proc.go(&go_mode).await?;
+        proc.go_search(&go_mode, &search_moves).await?;
         search_until_bestmove(proc, reader, &moves, &cancel_flag).await
     }
     .await;

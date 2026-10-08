@@ -1,5 +1,11 @@
 import { expect, test } from "vitest";
-import { clearBestLineCaches, explorerCache, memoizeAsync } from "../bestLineCache";
+import {
+    analysisKey,
+    clearBestLineCaches,
+    explorerCache,
+    memoizeAsync,
+    positionKey,
+} from "../bestLineCache";
 
 test("memoizeAsync reuses the result of a previous call with the same key", async () => {
     const cache = new Map<string, Promise<number>>();
@@ -40,4 +46,25 @@ test("clearBestLineCaches empties the caches", async () => {
     }));
     clearBestLineCaches();
     expect(explorerCache.size).toBe(0);
+});
+
+const INITIAL = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+
+test("positionKey ignores the move counters: the explorer does too", () => {
+    expect(positionKey(INITIAL)).toBe(
+        positionKey("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 3 7"),
+    );
+    // Everything the position is made of is kept, en passant square included.
+    expect(positionKey("rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq c6 0 2")).not.toBe(
+        positionKey("rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"),
+    );
+});
+
+test("analysisKey keeps the halfmove clock, which changes an endgame evaluation", () => {
+    expect(analysisKey("8/8/8/4k3/8/8/4K3/7R w - - 40 60")).toBe(
+        analysisKey("8/8/8/4k3/8/8/4K3/7R w - - 40 99"),
+    );
+    expect(analysisKey("8/8/8/4k3/8/8/4K3/7R w - - 40 60")).not.toBe(
+        analysisKey("8/8/8/4k3/8/8/4K3/7R w - - 2 60"),
+    );
 });

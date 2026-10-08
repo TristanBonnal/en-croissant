@@ -16,7 +16,7 @@ import BoardAnalysis from "../boards/BoardAnalysis";
 import BoardGame from "../boards/BoardGame";
 import { TreeStateProvider } from "../common/TreeStateContext";
 import BestLine from "../bestLine/BestLine";
-import { cancelBestLine } from "../bestLine/runner";
+import { releaseBestLine } from "../bestLine/runner";
 import Puzzles from "../puzzles/Puzzles";
 import { BoardTab } from "./BoardTab";
 import ConfirmChangesModal from "./ConfirmChangesModal";
@@ -68,7 +68,7 @@ export default function BoardsPage() {
           }
         }
         setTabs((prev) => prev.filter((tab) => tab.value !== value));
-        cancelBestLine(value);
+        releaseBestLine(value);
         unwrap(await commands.killEngines(value));
         await commands.abortGame(`${value}-game`);
       }

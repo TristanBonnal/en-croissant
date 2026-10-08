@@ -22,6 +22,23 @@ export function memoizeAsync<T>(
     return promise;
 }
 
+/**
+ * Cache key of a position for the explorer: the move counters are dropped, as
+ * Lichess ignores them, so transpositions share an entry.
+ */
+export function positionKey(fen: string) {
+    return fen.split(" ").slice(0, 4).join(" ");
+}
+
+/**
+ * Cache key of a position for the engine: the halfmove clock is kept (it
+ * changes an endgame evaluation through the fifty-move rule), the move number
+ * is not.
+ */
+export function analysisKey(fen: string) {
+    return fen.split(" ").slice(0, 5).join(" ");
+}
+
 export function clearBestLineCaches() {
     engineCache.clear();
     explorerCache.clear();

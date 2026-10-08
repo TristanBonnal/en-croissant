@@ -1,28 +1,27 @@
 import { INITIAL_FEN } from "chessops/fen";
 import { expect, test } from "vitest";
 import type { BestMoves } from "@/bindings";
+import { createTreeStore } from "@/state/store/tree";
 import {
     admissibleMoves,
     type BestLineNode,
-    type BestLineParams,
-    type ExplorerMove,
-    type ExplorerPosition,
     fenAfter,
-    findBestLine,
+    bestLineSettingsSchema,
+    cloudLinesUsable,
     isTrap,
+    isTrapMistake,
     lineComment,
     mainLine,
     mistakeAnnotation,
-    moveScore,
+    movesTo,
+    resultPathOf,
+    sansBetween,
     nodeAt,
     opponentMovesTo,
     replaceNodeAt,
     sansAlong,
     sansTo,
-    selectOpponentReplies,
-    selectStudiedMove,
     subtreeHeight,
-    wilsonLowerBound,
     withRateLimitRetry,
 } from "../bestLine";
 
@@ -42,19 +41,6 @@ function mateLine(san: string, uci: string, mate: number): BestMoves {
     return { ...line(san, uci, 0), score: { value: { type: "mate", value: mate }, wdl: null } };
 }
 
-function move(san: string, uci: string, white: number, draws: number, black: number): ExplorerMove {
-    return { san, uci, white, draws, black };
-}
-
-function position(moves: ExplorerMove[]): ExplorerPosition {
-    return {
-        white: moves.reduce((acc, m) => acc + m.white, 0),
-        draws: moves.reduce((acc, m) => acc + m.draws, 0),
-        black: moves.reduce((acc, m) => acc + m.black, 0),
-        moves,
-    };
-}
-
 const pawns = (value: number) => ({ mode: "pawns" as const, value });
 const winChance = (value: number) => ({ mode: "winChance" as const, value });
 
@@ -66,29 +52,9 @@ const whiteLines = [
     line("g3", "g2g3", 0, 5),
 ];
 
-const rawOptions = { tolerance: pawns(0.3), ranking: "raw" as const, minGamesPerMove: 1 };
-
-// --- stats -----------------------------------------------------------------
-
-test("moveScore counts draws as half points for white", () => {
-    expect(moveScore(move("e4", "e2e4", 55, 10, 35), "white")).toBeCloseTo(0.6);
-});
-
-test("moveScore uses black wins for black", () => {
-    expect(moveScore(move("e5", "e7e5", 35, 10, 55), "black")).toBeCloseTo(0.6);
-});
-
-test("moveScore of a move without games is 0", () => {
-    expect(moveScore(move("e4", "e2e4", 0, 0, 0), "white")).toBe(0);
-});
-
-test("wilsonLowerBound lowers the score of small samples", () => {
-    expect(wilsonLowerBound(0.6, 100)).toBeCloseTo(0.502, 3);
-    expect(wilsonLowerBound(0.6, 1_000_000)).toBeCloseTo(0.599, 3);
-});
-
-test("wilsonLowerBound of a move without games is 0", () => {
-    expect(wilsonLowerBound(0.6, 0)).toBe(0);
+test("the settings use the wins metric by default", () => {
+    expect(bestLineSettingsSchema.parse({}).metric).toBe("wins");
+    expect(bestLineSettingsSchema.parse({ ranking: "wilson" }).metric).toBe("wins");
 });
 
 // --- tolerance ---------------------------------------------------------------
@@ -146,422 +112,9 @@ test("a win chance tolerance accepts bigger pawn losses in decided positions", (
 
 // --- studied side ---------------------------------------------------------------
 
-test("selectStudiedMove picks the best score among admissible moves", () => {
-    const stats = [move("e4", "e2e4", 50, 10, 40), move("d4", "d2d4", 55, 10, 35)];
-    const { choice } = selectStudiedMove(whiteLines, position(stats), "white", rawOptions);
-    expect(choice.san).toBe("d4");
-    expect(choice.reason).toBe("stats");
-    expect(choice.stats).toEqual({ score: 0.6, games: 100, share: 0.5 });
-});
-
-test("selectStudiedMove ignores moves outside the tolerance even with better stats", () => {
-    const stats = [move("e4", "e2e4", 50, 0, 50), move("Nf3", "g1f3", 90, 0, 10)];
-    const { choice } = selectStudiedMove(whiteLines, position(stats), "white", rawOptions);
-    expect(choice.san).toBe("e4");
-});
-
-test("selectStudiedMove prefers more games when raw scores are within 1%", () => {
-    // e4: 57.0% on 5 000 games, d4: 56.3% on 20 000 games -> d4
-    const stats = [move("e4", "e2e4", 2850, 0, 2150), move("d4", "d2d4", 11260, 0, 8740)];
-    const { choice } = selectStudiedMove(whiteLines, position(stats), "white", rawOptions);
-    expect(choice.san).toBe("d4");
-});
-
-test("selectStudiedMove prefers the better raw score when the gap is above 1%", () => {
-    // e4: 58.0% on 5 000 games, d4: 56.3% on 20 000 games -> e4
-    const stats = [move("e4", "e2e4", 2900, 0, 2100), move("d4", "d2d4", 11260, 0, 8740)];
-    const { choice } = selectStudiedMove(whiteLines, position(stats), "white", rawOptions);
-    expect(choice.san).toBe("e4");
-});
-
-test("selectStudiedMove with the Wilson ranking prefers a reliable score", () => {
-    // e4: 60% on 200 games, d4: 58% on 50 000 games
-    const stats = [move("e4", "e2e4", 120, 0, 80), move("d4", "d2d4", 29000, 0, 21000)];
-    expect(selectStudiedMove(whiteLines, position(stats), "white", rawOptions).choice.san).toBe(
-        "e4",
-    );
-    expect(
-        selectStudiedMove(whiteLines, position(stats), "white", {
-            ...rawOptions,
-            ranking: "wilson",
-        }).choice.san,
-    ).toBe("d4");
-});
-
-test("selectStudiedMove ignores candidates below the per-move minimum of games", () => {
-    const stats = [move("e4", "e2e4", 500, 0, 500), move("d4", "d2d4", 3, 0, 0)];
-    const { choice } = selectStudiedMove(whiteLines, position(stats), "white", {
-        ...rawOptions,
-        minGamesPerMove: 100,
-    });
-    expect(choice.san).toBe("e4");
-    expect(choice.reason).toBe("stats");
-});
-
-test("selectStudiedMove falls back to the engine best move without enough games", () => {
-    const stats = [move("d4", "d2d4", 3, 0, 0)];
-    const { choice } = selectStudiedMove(whiteLines, position(stats), "white", {
-        ...rawOptions,
-        minGamesPerMove: 100,
-    });
-    expect(choice.san).toBe("e4");
-    expect(choice.reason).toBe("engine");
-    expect(choice.score).toEqual(whiteLines[0].score);
-});
-
-test("selectStudiedMove matches moves by SAN regardless of check marks", () => {
-    const lines = [line("Bb5+", "f1b5", 50, 1)];
-    const { choice } = selectStudiedMove(
-        lines,
-        position([move("Bb5", "f1b5", 60, 0, 40)]),
-        "white",
-        rawOptions,
-    );
-    expect(choice.reason).toBe("stats");
-});
-
-test("selectStudiedMove lists every engine candidate with its status", () => {
-    const stats = [
-        move("e4", "e2e4", 500, 100, 400),
-        move("d4", "d2d4", 3, 0, 0),
-        move("Nf3", "g1f3", 900, 0, 100),
-    ];
-    const { candidates } = selectStudiedMove(whiteLines, position(stats), "white", {
-        ...rawOptions,
-        minGamesPerMove: 100,
-    });
-    expect(candidates.map((c) => [c.san, c.status])).toEqual([
-        ["e4", "chosen"],
-        ["d4", "fewGames"],
-        ["Nf3", "outOfTolerance"],
-        ["c4", "outOfTolerance"],
-        ["g3", "outOfTolerance"],
-    ]);
-    expect(candidates[0].score).toEqual(whiteLines[0].score);
-    expect(candidates[2].stats?.games).toBe(1000);
-});
-
-test("selectStudiedMove marks admissible moves with a lower score", () => {
-    const stats = [move("e4", "e2e4", 50, 10, 40), move("d4", "d2d4", 55, 10, 35)];
-    const { candidates } = selectStudiedMove(whiteLines, position(stats), "white", rawOptions);
-    expect(candidates.slice(0, 2).map((c) => [c.san, c.status])).toEqual([
-        ["e4", "lowerScore"],
-        ["d4", "chosen"],
-    ]);
-});
-
 // --- opponent ----------------------------------------------------------------
 
-const replies = position([
-    move("d5", "d7d5", 6000, 3000, 6000),
-    move("Nf6", "g8f6", 4000, 2000, 4000),
-    move("e5", "e7e5", 1000, 1000, 1000),
-    move("c5", "c7c5", 1000, 0, 1000),
-]);
-
-test("selectOpponentReplies picks the most played move in line mode", () => {
-    const { replies: chosen } = selectOpponentReplies(replies, "black", 5000, {
-        minShare: 0.15,
-        maxReplies: 1,
-    });
-    expect(chosen.map((r) => r.san)).toEqual(["d5"]);
-    expect(chosen[0].reason).toBe("popular");
-    expect(chosen[0].stats?.games).toBe(15000);
-    expect(chosen[0].stats?.share).toBe(0.5);
-});
-
-test("selectOpponentReplies branches on replies above the share threshold", () => {
-    const { replies: chosen } = selectOpponentReplies(replies, "black", 5000, {
-        minShare: 0.15,
-        maxReplies: 3,
-    });
-    expect(chosen.map((r) => r.san)).toEqual(["d5", "Nf6"]);
-});
-
-test("selectOpponentReplies keeps at most maxReplies replies", () => {
-    const { replies: chosen } = selectOpponentReplies(replies, "black", 5000, {
-        minShare: 0,
-        maxReplies: 3,
-    });
-    expect(chosen.map((r) => r.san)).toEqual(["d5", "Nf6", "e5"]);
-});
-
-test("selectOpponentReplies lists the other replies as candidates", () => {
-    const { candidates } = selectOpponentReplies(replies, "black", 5000, {
-        minShare: 0.15,
-        maxReplies: 3,
-    });
-    expect(candidates.map((c) => [c.san, c.status])).toEqual([
-        ["d5", "chosen"],
-        ["Nf6", "chosen"],
-        ["e5", "other"],
-        ["c5", "other"],
-    ]);
-});
-
-test("selectOpponentReplies returns nothing when the position has too few games", () => {
-    const pos = position([move("d5", "d7d5", 1000, 0, 1000)]);
-    expect(
-        selectOpponentReplies(pos, "black", 5000, { minShare: 0, maxReplies: 1 }).replies,
-    ).toEqual([]);
-});
-
-test("selectOpponentReplies returns nothing when no move is known", () => {
-    expect(
-        selectOpponentReplies(position([]), "black", 0, { minShare: 0, maxReplies: 1 }).replies,
-    ).toEqual([]);
-});
-
-// --- search ------------------------------------------------------------------
-
-function fakeDeps(
-    analyses: Record<string, BestMoves[]>,
-    explorer: Record<string, ExplorerPosition>,
-) {
-    const analyzed: string[] = [];
-    const explored: string[] = [];
-    let positions = 0;
-    return {
-        analyzed,
-        explored,
-        positions: () => positions,
-        deps: {
-            analyze: async (fen: string) => {
-                analyzed.push(fen);
-                return analyses[fen] ?? [];
-            },
-            explore: async (fen: string) => {
-                explored.push(fen);
-                return explorer[fen] ?? position([]);
-            },
-            onPosition: () => {
-                positions++;
-            },
-        },
-    };
-}
-
 const AFTER_E4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1";
-const AFTER_D4 = "rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1";
-const AFTER_E4_E5 = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2";
-const AFTER_E4_C5 = "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2";
-
-function params(overrides: Partial<BestLineParams>): BestLineParams {
-    return {
-        fen: INITIAL_FEN,
-        color: "white",
-        plies: 2,
-        tolerance: pawns(0.3),
-        ranking: "raw",
-        minimumGames: 5000,
-        minGamesPerMove: 100,
-        branching: { minShare: 0.15, maxReplies: 1, maxDepth: 1 },
-        ...overrides,
-    };
-}
-
-const sans = (nodes: BestLineNode[]) => mainLine(nodes).map((n) => n.san);
-
-test("findBestLine plays the studied side and the opponent in turn", async () => {
-    const { deps, analyzed } = fakeDeps(
-        {
-            [INITIAL_FEN]: [line("e4", "e2e4", 30, 1), line("d4", "d2d4", 25, 2)],
-        },
-        {
-            [INITIAL_FEN]: position([
-                move("e4", "e2e4", 500, 100, 400),
-                move("d4", "d2d4", 520, 100, 380),
-            ]),
-        },
-    );
-    const nodes = await findBestLine(params({ plies: 1 }), deps);
-    expect(sans(nodes)).toEqual(["d4"]);
-    expect(nodes[0].color).toBe("white");
-    expect(nodes[0].fen).toBe(INITIAL_FEN);
-    expect(analyzed[0]).toBe(INITIAL_FEN);
-});
-
-test("findBestLine skips the engine for popular replies and evaluates them afterwards", async () => {
-    const { deps, analyzed } = fakeDeps(
-        {
-            [INITIAL_FEN]: [line("e4", "e2e4", 30, 1)],
-            [AFTER_E4_E5]: [line("Nf3", "g1f3", 40, 1)],
-        },
-        {
-            [INITIAL_FEN]: position([move("e4", "e2e4", 500, 100, 400)]),
-            [AFTER_E4]: position([
-                move("e5", "e7e5", 3000, 1000, 3000),
-                move("c5", "c7c5", 1000, 500, 1000),
-            ]),
-        },
-    );
-    const nodes = await findBestLine(params({ plies: 4 }), deps);
-    const line3 = mainLine(nodes);
-    expect(line3.map((s) => s.san)).toEqual(["e4", "e5", "Nf3"]);
-    expect(line3.map((s) => s.reason)).toEqual(["stats", "popular", "engine"]);
-    expect(line3[1].score).toEqual(line("Nf3", "g1f3", 40).score);
-    expect(analyzed).not.toContain(AFTER_E4);
-});
-
-test("findBestLine evaluates the final position when the line ends with a popular reply", async () => {
-    const { deps, analyzed } = fakeDeps(
-        {
-            [INITIAL_FEN]: [line("e4", "e2e4", 30, 1)],
-            [AFTER_E4_E5]: [line("Nf3", "g1f3", 40, 1), line("Bc4", "f1c4", 20, 2)],
-        },
-        {
-            [INITIAL_FEN]: position([move("e4", "e2e4", 500, 100, 400)]),
-            [AFTER_E4]: position([move("e5", "e7e5", 3000, 1000, 3000)]),
-        },
-    );
-    const nodes = await findBestLine(params({ plies: 2 }), deps);
-    const moves = mainLine(nodes);
-    expect(moves.map((s) => s.san)).toEqual(["e4", "e5"]);
-    expect(moves[1].score).toEqual(line("Nf3", "g1f3", 40).score);
-    expect(analyzed).toEqual([INITIAL_FEN, AFTER_E4_E5]);
-});
-
-test("findBestLine falls back to the engine for the opponent with too few games", async () => {
-    const { deps } = fakeDeps(
-        { [AFTER_E4]: [line("c5", "c7c5", -10, 1)] },
-        {
-            [AFTER_E4]: position([move("e5", "e7e5", 100, 0, 100), move("c5", "c7c5", 50, 0, 50)]),
-        },
-    );
-    const nodes = await findBestLine(params({ fen: AFTER_E4, plies: 1 }), deps);
-    expect(nodes[0].san).toBe("c5");
-    expect(nodes[0].color).toBe("black");
-    expect(nodes[0].reason).toBe("engine");
-    expect(nodes[0].stats).toEqual({ score: 0.5, games: 100, share: 1 / 3 });
-});
-
-test("findBestLine branches on frequent opponent replies in tree mode", async () => {
-    const { deps } = fakeDeps(
-        {
-            [INITIAL_FEN]: [line("e4", "e2e4", 30, 1)],
-            [AFTER_E4_E5]: [line("Nf3", "g1f3", 40, 1)],
-            [AFTER_E4_C5]: [line("Nf3", "g1f3", 35, 1)],
-        },
-        {
-            [INITIAL_FEN]: position([move("e4", "e2e4", 500, 100, 400)]),
-            [AFTER_E4]: position([
-                move("e5", "e7e5", 3000, 1000, 3000),
-                move("c5", "c7c5", 2000, 1000, 2000),
-                move("e6", "e7e6", 100, 0, 100),
-            ]),
-        },
-    );
-    const nodes = await findBestLine(
-        params({ plies: 3, branching: { minShare: 0.15, maxReplies: 3, maxDepth: 1 } }),
-        deps,
-    );
-    expect(nodes.map((n) => n.san)).toEqual(["e4"]);
-    expect(nodes[0].children.map((n) => n.san)).toEqual(["e5", "c5"]);
-    expect(nodes[0].children.map((n) => n.children.map((c) => c.san))).toEqual([["Nf3"], ["Nf3"]]);
-    expect(nodes[0].children[1].score).toEqual(line("Nf3", "g1f3", 35).score);
-});
-
-test("findBestLine counts plies from a black-to-move start", async () => {
-    const { deps } = fakeDeps(
-        {
-            [AFTER_E4]: [line("c5", "c7c5", -10, 1)],
-            [AFTER_E4_C5]: [line("Nf3", "g1f3", 20, 1)],
-        },
-        {},
-    );
-    const nodes = await findBestLine(params({ fen: AFTER_E4, color: "black", plies: 2 }), deps);
-    expect(sans(nodes)).toEqual(["c5", "Nf3"]);
-});
-
-test("findBestLine plays a forced first move and continues", async () => {
-    const { deps } = fakeDeps(
-        {
-            [INITIAL_FEN]: [line("e4", "e2e4", 30, 1), line("d4", "d2d4", 25, 2)],
-        },
-        {
-            [INITIAL_FEN]: position([
-                move("e4", "e2e4", 500, 100, 400),
-                move("d4", "d2d4", 400, 100, 500),
-            ]),
-            [AFTER_D4]: position([move("d5", "d7d5", 6000, 1000, 6000)]),
-        },
-    );
-    const nodes = await findBestLine(params({ forcedMove: "d4" }), deps);
-    expect(sans(nodes)).toEqual(["d4", "d5"]);
-    expect(nodes[0].reason).toBe("manual");
-    expect(nodes[0].score).toEqual(line("d4", "d2d4", 25, 2).score);
-    expect(nodes[0].stats?.games).toBe(1000);
-});
-
-test("findBestLine records the candidates of each move", async () => {
-    const { deps } = fakeDeps(
-        { [INITIAL_FEN]: [line("e4", "e2e4", 30, 1), line("d4", "d2d4", 25, 2)] },
-        {},
-    );
-    const nodes = await findBestLine(params({ plies: 1 }), deps);
-    expect(nodes[0].candidates.map((c) => [c.san, c.status])).toEqual([
-        ["e4", "chosen"],
-        ["d4", "fewGames"],
-    ]);
-});
-
-test("findBestLine stops when the game is over", async () => {
-    const mated = "rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3";
-    const { deps, analyzed } = fakeDeps({}, {});
-    const nodes = await findBestLine(params({ fen: mated, plies: 6 }), deps);
-    expect(nodes).toEqual([]);
-    expect(analyzed).toEqual([]);
-});
-
-test("findBestLine stops when no move can be found", async () => {
-    const { deps } = fakeDeps({}, {});
-    expect(await findBestLine(params({ plies: 6 }), deps)).toEqual([]);
-});
-
-test("findBestLine reports each position and returns the partial line when cancelled", async () => {
-    let cancelled = false;
-    const { deps, positions } = fakeDeps(
-        {
-            [INITIAL_FEN]: [line("e4", "e2e4", 30, 1)],
-            [AFTER_E4]: [line("e5", "e7e5", -30, 1)],
-        },
-        {},
-    );
-    const nodes = await findBestLine(params({ plies: 6 }), {
-        ...deps,
-        isCancelled: () => cancelled,
-        onPosition: () => {
-            deps.onPosition();
-            cancelled = true;
-        },
-    });
-    expect(sans(nodes)).toEqual(["e4"]);
-    expect(positions()).toBe(1);
-});
-
-test("findBestLine returns the partial line when a dependency fails after cancellation", async () => {
-    let cancelled = false;
-    const nodes = await findBestLine(params({}), {
-        analyze: async () => {
-            cancelled = true;
-            throw new Error("Analysis cancelled");
-        },
-        explore: async () => position([]),
-        isCancelled: () => cancelled,
-    });
-    expect(nodes).toEqual([]);
-});
-
-test("findBestLine rethrows dependency errors when not cancelled", async () => {
-    await expect(
-        findBestLine(params({}), {
-            analyze: async () => [line("e4", "e2e4", 30)],
-            explore: async () => {
-                throw new Error("500 Internal Server Error");
-            },
-        }),
-    ).rejects.toThrow("500");
-});
 
 test("mainLine follows the first child of each node", () => {
     const leaf = (san: string): BestLineNode => ({
@@ -668,7 +221,7 @@ test("lineComment shows the score in green for a studied move chosen by its stat
             node({
                 reason: "stats",
                 score: cp(60),
-                stats: { score: 0.578, games: 10, share: 0.4 },
+                stats: { score: 0.578, opponentScore: 0, games: 10, share: 0.4 },
             }),
             "white",
             labels,
@@ -679,7 +232,11 @@ test("lineComment shows the score in green for a studied move chosen by its stat
 test("lineComment shows the evaluation in blue for a studied engine move", () => {
     expect(
         lineComment(
-            node({ reason: "engine", score: cp(45), stats: { score: 0.5, games: 3, share: 0.1 } }),
+            node({
+                reason: "engine",
+                score: cp(45),
+                stats: { score: 0.5, opponentScore: 0, games: 3, share: 0.1 },
+            }),
             "white",
             labels,
         ),
@@ -693,7 +250,7 @@ test("lineComment shows how often the opponent's popular move was played", () =>
                 color: "black",
                 reason: "popular",
                 score: cp(30),
-                stats: { score: 0.45, games: 12345, share: 0.452 },
+                stats: { score: 0.45, opponentScore: 0, games: 12345, share: 0.452 },
             }),
             "white",
             labels,
@@ -710,7 +267,7 @@ test("lineComment shows the evaluation without color for an opponent engine move
 });
 
 test("lineComment describes a manually chosen move by its stats, without color", () => {
-    const stats = { score: 0.52, games: 800, share: 0.2 };
+    const stats = { score: 0.52, opponentScore: 0.3, games: 800, share: 0.2 };
     expect(lineComment(node({ reason: "manual", stats }), "white", labels)).toEqual({
         text: "52.0% winrate",
     });
@@ -768,59 +325,6 @@ test("fenAfter plays the node's move", () => {
     expect(fenAfter(leaf("e4"))).toBe(AFTER_E4);
 });
 
-const AFTER_E4_E5_NF3 = "rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2";
-
-function branchingDeps() {
-    return fakeDeps(
-        {
-            [INITIAL_FEN]: [line("e4", "e2e4", 30, 1)],
-            [AFTER_E4_E5]: [line("Nf3", "g1f3", 40, 1)],
-            [AFTER_E4_C5]: [line("Nf3", "g1f3", 35, 1)],
-        },
-        {
-            [INITIAL_FEN]: position([move("e4", "e2e4", 500, 100, 400)]),
-            [AFTER_E4]: position([
-                move("e5", "e7e5", 3000, 1000, 3000),
-                move("c5", "c7c5", 2000, 1000, 2000),
-            ]),
-            [AFTER_E4_E5_NF3]: position([
-                move("Nc6", "b8c6", 3000, 1000, 3000),
-                move("d6", "d7d6", 2000, 1000, 2000),
-            ]),
-        },
-    );
-}
-
-test("findBestLine only branches on the first opponent moves up to the branching depth", async () => {
-    const { deps } = branchingDeps();
-    const nodes = await findBestLine(
-        params({ plies: 4, branching: { minShare: 0.15, maxReplies: 3, maxDepth: 1 } }),
-        deps,
-    );
-    expect(nodes[0].children.map((n) => n.san)).toEqual(["e5", "c5"]);
-    const nf3 = nodes[0].children[0].children[0];
-    expect(nf3.children.map((n) => n.san)).toEqual(["Nc6"]);
-});
-
-test("findBestLine branches again below the first opponent move with a deeper branching", async () => {
-    const { deps } = branchingDeps();
-    const nodes = await findBestLine(
-        params({ plies: 4, branching: { minShare: 0.15, maxReplies: 3, maxDepth: 2 } }),
-        deps,
-    );
-    const nf3 = nodes[0].children[0].children[0];
-    expect(nf3.children.map((n) => n.san)).toEqual(["Nc6", "d6"]);
-});
-
-test("findBestLine does not branch with a branching depth of 0", async () => {
-    const { deps } = branchingDeps();
-    const nodes = await findBestLine(
-        params({ plies: 2, branching: { minShare: 0.15, maxReplies: 3, maxDepth: 0 } }),
-        deps,
-    );
-    expect(nodes[0].children.map((n) => n.san)).toEqual(["e5"]);
-});
-
 test("opponentMovesTo counts the opponent moves before a node", () => {
     const tree = [
         {
@@ -849,94 +353,21 @@ test("mistakeAnnotation grades the win chance lost by a move", () => {
     expect(mistakeAnnotation(cp(-30), cp(-300), "white")).toBe("??");
 });
 
-test("isTrap only keeps real mistakes", () => {
+test("isTrapMistake requires a mistake that humans actually punish", () => {
+    // The studied side scores 60% in the position.
+    const punished = { score: 0.25, opponentScore: 0.75, games: 1000, share: 0.2 };
+    const unpunished = { score: 0.42, opponentScore: 0.58, games: 1000, share: 0.2 };
+    expect(isTrapMistake("??", punished, 0.6)).toBe(true);
+    expect(isTrapMistake("?", punished, 0.6)).toBe(true);
+    expect(isTrapMistake("?!", punished, 0.6)).toBe(false);
+    expect(isTrapMistake("??", unpunished, 0.6)).toBe(false);
+    expect(isTrapMistake("??", { ...punished, games: 10 }, 0.6)).toBe(false);
+    expect(isTrapMistake("??", undefined, 0.6)).toBe(false);
+});
+
+test("isTrap reads the trap flag of a node", () => {
     expect(isTrap(leaf("e5"))).toBe(false);
-    expect(isTrap({ ...leaf("e5"), annotation: "?!" })).toBe(false);
-    expect(isTrap({ ...leaf("e5"), annotation: "?" })).toBe(true);
-    expect(isTrap({ ...leaf("e5"), annotation: "??" })).toBe(true);
-});
-
-test("findBestLine annotates a popular opponent mistake", async () => {
-    const { deps } = fakeDeps(
-        {
-            [INITIAL_FEN]: [line("e4", "e2e4", 30, 1)],
-            [AFTER_E4_E5]: [line("Nf3", "g1f3", 300, 1)],
-        },
-        {
-            [INITIAL_FEN]: position([move("e4", "e2e4", 500, 100, 400)]),
-            [AFTER_E4]: position([move("e5", "e7e5", 3000, 1000, 3000)]),
-        },
-    );
-    const nodes = await findBestLine(params({ plies: 3 }), deps);
-    const e5 = nodes[0].children[0];
-    expect(e5.annotation).toBe("??");
-    expect(nodes[0].annotation).toBeUndefined();
-});
-
-test("findBestLine evaluates the start position to judge a first opponent move", async () => {
-    const { deps } = fakeDeps(
-        {
-            [AFTER_E4]: [line("c5", "c7c5", 30, 1)],
-            [AFTER_E4_E5]: [line("Nf3", "g1f3", 300, 1)],
-        },
-        { [AFTER_E4]: position([move("e5", "e7e5", 3000, 1000, 3000)]) },
-    );
-    const nodes = await findBestLine(params({ fen: AFTER_E4, plies: 1 }), deps);
-    expect(nodes[0].annotation).toBe("??");
-});
-
-test("findBestLine branches on frequent opponent mistakes below the branching share", async () => {
-    const { deps } = fakeDeps(
-        {
-            [INITIAL_FEN]: [line("e4", "e2e4", 30, 1)],
-            [AFTER_E4_E5]: [line("Nf3", "g1f3", 40, 1)],
-            [AFTER_E4_C5]: [line("Nf3", "g1f3", 300, 1)],
-        },
-        {
-            [INITIAL_FEN]: position([move("e4", "e2e4", 500, 100, 400)]),
-            [AFTER_E4]: position([
-                move("e5", "e7e5", 3000, 1000, 3000),
-                move("c5", "c7c5", 1000, 0, 1000),
-                move("e6", "e7e6", 100, 0, 100),
-            ]),
-        },
-    );
-    const nodes = await findBestLine(
-        params({
-            plies: 2,
-            branching: { minShare: 0.5, maxReplies: 3, maxDepth: 1, trapMinShare: 0.05 },
-        }),
-        deps,
-    );
-    const replies = nodes[0].children;
-    expect(replies.map((n) => [n.san, n.reason])).toEqual([
-        ["e5", "popular"],
-        ["c5", "trap"],
-    ]);
-    expect(replies[1].annotation).toBe("??");
-    expect(replies[1].stats?.share).toBeCloseTo(2000 / 9200);
-});
-
-test("findBestLine does not look for trap branches without the option", async () => {
-    const { deps, analyzed } = fakeDeps(
-        {
-            [INITIAL_FEN]: [line("e4", "e2e4", 30, 1)],
-            [AFTER_E4_C5]: [line("Nf3", "g1f3", 300, 1)],
-        },
-        {
-            [INITIAL_FEN]: position([move("e4", "e2e4", 500, 100, 400)]),
-            [AFTER_E4]: position([
-                move("e5", "e7e5", 3000, 1000, 3000),
-                move("c5", "c7c5", 1000, 0, 1000),
-            ]),
-        },
-    );
-    const nodes = await findBestLine(
-        params({ plies: 2, branching: { minShare: 0.5, maxReplies: 3, maxDepth: 1 } }),
-        deps,
-    );
-    expect(nodes[0].children.map((n) => n.san)).toEqual(["e5"]);
-    expect(analyzed).not.toContain(AFTER_E4_C5);
+    expect(isTrap({ ...leaf("e5"), trap: true })).toBe(true);
 });
 
 test("lineComment describes a trap branch by how often it was played", () => {
@@ -945,10 +376,63 @@ test("lineComment describes a trap branch by how often it was played", () => {
             node({
                 color: "black",
                 reason: "trap",
-                stats: { score: 0.3, games: 2000, share: 0.217 },
+                stats: { score: 0.3, opponentScore: 0, games: 2000, share: 0.217 },
             }),
             "white",
             labels,
         ),
     ).toEqual({ text: "21.7% played · 2000 games" });
+});
+
+test("cloudLinesUsable requires enough lines at the requested depth", () => {
+    const lines = [line("e4", "e2e4", 30, 1), line("d4", "d2d4", 25, 2)].map((l) => ({
+        ...l,
+        depth: 40,
+    }));
+    expect(cloudLinesUsable(lines, 18, 2)).toBe(true);
+    expect(cloudLinesUsable(lines, 18, 5)).toBe(false);
+    expect(cloudLinesUsable(lines, 50, 2)).toBe(false);
+    expect(cloudLinesUsable([], 18, 1)).toBe(false);
+});
+
+// --- analysis purpose and depth ----------------------------------------------
+
+function rootAfter(moves: string[], fen?: string) {
+    const store = createTreeStore();
+    if (fen) store.getState().setFen(fen);
+    store.getState().addLine(moves.map((san) => ({ san })));
+    const { root, position } = store.getState();
+    return { root, position };
+}
+
+test("movesTo numbers the moves leading to a position", () => {
+    const { root, position } = rootAfter(["e4", "c5", "Nf3"]);
+    expect(movesTo(root, position)).toBe("1. e4 c5 2. Nf3");
+    expect(movesTo(root, [])).toBe("");
+});
+
+test("movesTo keeps the last moves of a long line", () => {
+    const { root, position } = rootAfter(["e4", "c5", "Nf3", "d6", "d4", "cxd4", "Nxd4"]);
+    expect(movesTo(root, position, 4)).toBe("… 2... d6 3. d4 cxd4 4. Nxd4");
+});
+
+test("movesTo starts a black move with an ellipsis", () => {
+    const { root, position } = rootAfter(["c5"], AFTER_E4);
+    expect(movesTo(root, position)).toBe("1... c5");
+});
+
+// --- start position reuse ----------------------------------------------------
+
+test("sansBetween lists the moves from a node to one of its descendants", () => {
+    const { root, position } = rootAfter(["e4", "c5", "Nf3"]);
+    expect(sansBetween(root, [0], position)).toEqual(["c5", "Nf3"]);
+    expect(sansBetween(root, position, position)).toEqual([]);
+    expect(sansBetween(root, [1], position)).toBeNull();
+});
+
+test("resultPathOf finds the moves of a result", () => {
+    expect(resultPathOf(forest(), ["e4", "c5"])).toEqual([0, 1]);
+    expect(resultPathOf(forest(), ["e4", "e5", "Nf3"])).toEqual([0, 0, 0]);
+    expect(resultPathOf(forest(), ["e4", "d5"])).toBeNull();
+    expect(resultPathOf(forest(), [])).toBeNull();
 });
