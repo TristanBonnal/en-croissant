@@ -2,6 +2,7 @@ import { INITIAL_FEN } from "chessops/fen";
 import { expect, test } from "vitest";
 import { legalSans, playSan } from "@/utils/bestLine/position";
 import { coverageOf, searchBestLine } from "@/utils/bestLine/search";
+import { toBestLineNodes } from "@/utils/bestLine/project";
 import { mainBranch } from "@/utils/bestLine/tree";
 import { fakeBook, fakeEngine, searchParams as params } from "./bestLineFixtures";
 
@@ -159,6 +160,39 @@ test("searchBestLine reports the progress of the search", async () => {
 
     expect(progress.length).toBeGreaterThan(1);
     expect(progress).toEqual([...progress].sort((a, b) => a - b));
+});
+
+test("searchBestLine finds the same tree when it fetches positions ahead", async () => {
+    const run = async (ahead: boolean) => {
+        const book = fakeBook({ shares: [0.5, 0.3, 0.1] });
+        const engine = fakeEngine([30, 25, 10, 0, -10]);
+        const cache = new Map<string, ReturnType<typeof book.explore>>();
+        const explore = (fen: string) => {
+            if (!cache.has(fen)) cache.set(fen, book.explore(fen));
+            return cache.get(fen)!;
+        };
+        const prefetched: string[] = [];
+        const result = await searchBestLine(params({ maxPlies: 5, minReach: 0.01 }), {
+            explore,
+            analyze: engine.analyze,
+            prefetch: ahead
+                ? (fen) => {
+                      prefetched.push(fen);
+                      void explore(fen);
+                      return true;
+                  }
+                : undefined,
+        });
+        return { ...result, prefetched };
+    };
+    const plain = await run(false);
+    const ahead = await run(true);
+
+    expect(ahead.prefetched.length).toBeGreaterThan(0);
+    expect(ahead.stats).toEqual(plain.stats);
+    expect(toBestLineNodes(ahead.root, { mode: "tree", metric: "score" })).toEqual(
+        toBestLineNodes(plain.root, { mode: "tree", metric: "score" }),
+    );
 });
 
 // --- coverage ----------------------------------------------------------------

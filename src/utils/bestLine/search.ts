@@ -46,6 +46,8 @@ const SIGMA_FLOOR = 0.01;
 const MAX_EXPANDED = 3000;
 /** Opponent replies listed but not searched, for the result table. */
 const LISTED_REPLIES = 5;
+/** Positions next in line whose explorer data is fetched ahead of their turn. */
+const LOOKAHEAD = 4;
 
 /** Games the rates of a position are worth when shrinking the moves played from it. */
 export const DEFAULT_SHRINKAGE = 100;
@@ -99,6 +101,12 @@ export type SearchStats = {
 export type SearchDeps = {
     analyze: (fen: string, request: AnalysisRequest) => Promise<BestMoves[]>;
     explore: (fen: string) => Promise<ExplorerPosition>;
+    /**
+     * Starts fetching, without waiting, the explorer data of a position the
+     * search will probably open soon, so that `explore` finds it ready. Returns
+     * false when it can't start now, to be offered again later.
+     */
+    prefetch?: (fen: string) => boolean;
     isCancelled?: () => boolean;
     onProgress?: (stats: SearchStats, root: SearchNode) => void;
 };
@@ -397,6 +405,23 @@ export async function searchBestLine(
         }
     }
 
+    /**
+     * Fetches ahead the positions next in line, so that their explorer requests
+     * run while the search waits on the engine or on another request. The order
+     * in which positions are opened is unchanged, and so is the result.
+     */
+    const prefetched = new WeakSet<SearchNode>();
+    function prefetchAhead() {
+        const prefetch = deps.prefetch;
+        if (!prefetch) return;
+        const next = frontier.peek(LOOKAHEAD, (node) => !prefetched.has(node) && isLive(node));
+        for (const node of next) {
+            if (positionOf(node.fen)?.isEnd() !== false || prefetch(node.fen)) {
+                prefetched.add(node);
+            }
+        }
+    }
+
     async function visit(node: SearchNode) {
         await expand(node);
         countExpansion(node);
@@ -416,6 +441,7 @@ export async function searchBestLine(
         }
         const node = frontier.pop();
         if (!node || !isLive(node)) continue;
+        prefetchAhead();
         await visit(node);
     }
     return { root, stats };

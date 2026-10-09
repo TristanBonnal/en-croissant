@@ -45,6 +45,7 @@ import {
     explorerCache,
     memoizeAsync,
     positionKey,
+    prefetchingExplorer,
 } from "@/utils/bestLineCache";
 import { colorComment } from "@/utils/commentColor";
 import type { LocalEngine } from "@/utils/engines";
@@ -67,6 +68,12 @@ const treeStores = new Map<string, TreeStore>();
 const cancelFlags = new Map<string, boolean>();
 
 const analysisId = (tab: string) => `bestline_${tab}`;
+
+/**
+ * Explorer requests a search keeps running at once. Lichess answers a burst
+ * with a 429 and a minute's wait, so this stays small.
+ */
+const EXPLORER_CONCURRENCY = 3;
 
 /**
  * The engine stays up a while after a search, so the next one doesn't start
@@ -370,29 +377,39 @@ async function run(
             }, 250);
         });
 
+    // Prefetches can still answer after the search, and must not touch the
+    // state of the next one.
+    let searching = true;
     try {
-        const explore = (fen: string) =>
-            memoizeAsync(explorerCache, `${explorerKey}|${positionKey(fen)}`, () => {
+        const { explore, prefetch } = prefetchingExplorer(
+            explorerCache,
+            (fen) => `${explorerKey}|${positionKey(fen)}`,
+            (fen) => {
                 report.explorer++;
                 const start = Date.now();
                 return withRateLimitRetry(() => getLichessGames(fen, explorerOptions, token), {
                     isRateLimited: (e) => e instanceof LichessHttpError && e.status === 429,
                     sleep,
                     isCancelled,
-                    onWait: (ms) =>
+                    onWait: (ms) => {
+                        if (!searching) return;
                         store.set(runAtom, (prev) => ({
                             ...prev,
                             waitingUntil: Date.now() + ms,
-                        })),
+                        }));
+                    },
                 }).finally(() => {
                     report.explorerSeconds += (Date.now() - start) / 1000;
-                    store.set(runAtom, (prev) => ({ ...prev, waitingUntil: null }));
+                    if (searching) store.set(runAtom, (prev) => ({ ...prev, waitingUntil: null }));
                 });
-            });
+            },
+            EXPLORER_CONCURRENCY,
+        );
 
         const { root, stats } = await searchBestLine(params, {
             analyze,
             explore,
+            prefetch: (fen) => !isCancelled() && prefetch(fen),
             isCancelled,
             // The tree is searched most likely first, so its coverage of the
             // games to come is the honest measure of how far the search is.
@@ -430,6 +447,7 @@ async function run(
             error: e instanceof Error ? e.message : String(e),
         }));
     } finally {
+        searching = false;
         cancelFlags.delete(tab);
         keepSession(tab);
         report.seconds = (Date.now() - started) / 1000;
