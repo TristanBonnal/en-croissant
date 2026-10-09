@@ -63,7 +63,27 @@ export type Tolerance = { mode: "pawns" | "winChance"; value: number };
  */
 export type Metric = "wins" | "score";
 
-export type MoveReason = "stats" | "popular" | "engine" | "manual" | "trap";
+/** Which criterion played in choosing a move. */
+export type MoveReason =
+    /** Best expected result among the candidates. */
+    | "score"
+    /** Candidates too close to tell apart: the most played one won. */
+    | "mostPlayed"
+    /** The only candidate with enough games. */
+    | "onlyMove"
+    /** No candidate had enough games, so the engine chose. */
+    | "engineChoice"
+    /** The explorer knows too little about the position: the engine plays on. */
+    | "outOfBook"
+    /** The opponent's most played reply. */
+    | "popular"
+    /** A mistake the opponent plays often and loses after. */
+    | "trap"
+    /** Played instead of the search's own choice. */
+    | "manual"
+    /** Results stored by an older version. */
+    | "stats"
+    | "engine";
 
 /** Win chance points (%) lost by a dubious move, a mistake and a blunder (as in game reports). */
 const MISTAKE_THRESHOLDS: [number, Annotation][] = [
@@ -86,7 +106,13 @@ export type MoveChoice = {
     san: string;
     reason: MoveReason;
     score?: Score;
+    /** Whether `score` comes from the precise depth. */
+    precise?: boolean;
     stats?: MoveStats;
+    /** Expected result of the move once its continuations are taken into account. */
+    value?: number;
+    /** `value` minus the risk penalty: the number the choice was made on. */
+    bound?: number;
 };
 
 export type CandidateStatus = "chosen" | "outOfTolerance" | "fewGames" | "lowerScore" | "other";
@@ -95,9 +121,13 @@ export type CandidateStatus = "chosen" | "outOfTolerance" | "fewGames" | "lowerS
 export type Candidate = {
     san: string;
     score?: Score;
+    /** Whether `score` comes from the precise depth. */
+    precise?: boolean;
     stats?: MoveStats;
-    /** Value used to rank the studied side's candidates (expected score). */
+    /** Expected result of the move once its continuations are taken into account. */
     value?: number;
+    /** `value` minus the risk penalty: the number the choice was made on. */
+    bound?: number;
     status: CandidateStatus;
 };
 
@@ -315,6 +345,10 @@ export type LineCommentLabels = {
     engine: (evaluation: string) => string;
 };
 
+/** Reasons whose move was decided on the statistics, and on the engine. */
+const STATS_REASONS: MoveReason[] = ["score", "mostPlayed", "onlyMove", "stats"];
+const ENGINE_REASONS: MoveReason[] = ["engineChoice", "outOfBook", "engine"];
+
 /**
  * Annotation of a move of the line: the score (green) or the evaluation (blue)
  * for the studied side, how often the move was played for a popular opponent
@@ -326,13 +360,13 @@ export function lineComment(
     labels: LineCommentLabels,
 ): { text: string; color?: "green" | "blue" } {
     const studied = node.color === studiedColor;
-    if (node.reason === "stats" && node.stats) {
+    if (STATS_REASONS.includes(node.reason) && node.stats) {
         return { text: labels.winrate(formatPercent(node.stats.score)), color: "green" };
     }
     if ((node.reason === "popular" || node.reason === "trap") && node.stats) {
         return { text: labels.played(formatPercent(node.stats.share), node.stats.games) };
     }
-    if (node.reason === "engine" && node.score) {
+    if (ENGINE_REASONS.includes(node.reason) && node.score) {
         const text = labels.engine(formatScore(node.score.value));
         return studied ? { text, color: "blue" } : { text };
     }

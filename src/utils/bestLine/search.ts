@@ -194,6 +194,7 @@ export async function searchBestLine(
             probability: node.studied ? 0 : 1,
             score: best.score,
             status: node.studied ? "chosen" : "reply",
+            decidedBy: "outOfBook",
             value: engineValue(best.score, params.color, drawWeight, drawRateOf(node)),
             expansions: 0,
         };
@@ -252,6 +253,7 @@ export async function searchBestLine(
             chosen.score = best.score;
             chosen.value = engineValue(best.score, params.color, drawWeight, drawRateOf(node));
             chosen.status = "chosen";
+            chosen.decidedBy = "engineChoice";
             attachChild(node, chosen, node.reach);
             return;
         }

@@ -29,6 +29,7 @@ import {
     subtreeHeight,
     withRateLimitRetry,
 } from "@/utils/bestLine";
+import { evaluateLeaves } from "@/utils/bestLine/evaluate";
 import { countNodes, type OutputOptions, toBestLineNodes } from "@/utils/bestLine/project";
 import {
     coverageOf,
@@ -174,6 +175,8 @@ function outputOptionsOf(config: SearchConfig): OutputOptions {
     return {
         mode: settings.mode,
         metric: settings.metric,
+        preciseDepth: settings.depth,
+        risk: DEFAULT_RISK,
         trapMinShare: settings.trapBranching ? settings.trapMinShare : undefined,
     };
 }
@@ -419,6 +422,10 @@ async function run(
             report.checked = checks.checked;
             report.changed = checks.changed;
         }
+
+        // The search never analyses the opponent's positions, so the moves a
+        // branch ends on get their evaluation here.
+        await evaluateLeaves(root, { mode: config.settings.mode }, { analyze, isCancelled });
 
         const nodes = toBestLineNodes(root, outputOptionsOf(config));
         report.moves = countNodes(nodes);

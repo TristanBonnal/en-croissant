@@ -59,12 +59,24 @@ test("toBestLineNodes reads the statistics from the point of view of whoever pla
     expect(theirs.stats!.opponentScore).toBeCloseTo(0.6, 2);
 });
 
-test("toBestLineNodes says why each move was played", async () => {
+test("toBestLineNodes names the criterion that picked each move", async () => {
     const nodes = toBestLineNodes(await tree({ maxPlies: 2 }), { mode: "line" });
-    expect(nodes[0].reason).toBe("stats");
+    // Two candidates with the same results: the most played one wins.
+    expect(nodes[0].reason).toBe("mostPlayed");
     expect(nodes[0].children[0].reason).toBe("popular");
     expect(nodes[0].color).toBe("white");
     expect(nodes[0].children[0].color).toBe("black");
+});
+
+test("toBestLineNodes reports a single eligible candidate as the only option", async () => {
+    // One listed move only, so there is nothing to choose between.
+    const book = fakeBook({ shares: [0.9] });
+    const engine = fakeEngine();
+    const { root } = await searchBestLine(searchParams({ maxPlies: 1 }), {
+        explore: book.explore,
+        analyze: engine.analyze,
+    });
+    expect(toBestLineNodes(root, { mode: "line" })[0].reason).toBe("onlyMove");
 });
 
 test("toBestLineNodes marks a forced move as played by hand", async () => {
@@ -79,16 +91,24 @@ test("toBestLineNodes marks a forced move as played by hand", async () => {
     expect(nodes[0].reason).toBe("manual");
 });
 
-test("toBestLineNodes of a position the engine decided reports an engine move", async () => {
-    // Nobody played this position: no statistics, the engine decides.
-    const book = fakeBook({ games: 10 });
+test("toBestLineNodes tells a position left out of book from one without ranked moves", async () => {
+    // Nobody played this position at all: the engine plays on alone.
+    const thin = fakeBook({ games: 10 });
     const engine = fakeEngine();
-    const { root } = await searchBestLine(searchParams({ maxPlies: 1 }), {
-        explore: book.explore,
+    const { root: unknown } = await searchBestLine(searchParams({ maxPlies: 1 }), {
+        explore: thin.explore,
         analyze: engine.analyze,
     });
-    const nodes = toBestLineNodes(root, { mode: "line" });
-    expect(nodes[0].reason).toBe("engine");
+    expect(toBestLineNodes(unknown, { mode: "line" })[0].reason).toBe("outOfBook");
+
+    // The position is well known, but every move in it is too rare to rank.
+    const scattered = fakeBook({ games: 100_000, shares: [0.0005, 0.0003] });
+    const { root: rare } = await searchBestLine(searchParams({ maxPlies: 1 }), {
+        explore: scattered.explore,
+        analyze: engine.analyze,
+    });
+    const nodes = toBestLineNodes(rare, { mode: "line" });
+    expect(nodes[0].reason).toBe("engineChoice");
     expect(nodes[0].score).toBeDefined();
 });
 
@@ -143,4 +163,29 @@ test("trapFlag only keeps a frequent mistake the studied side punishes", () => {
     expect(trapFlag("?!", mistake, 0.55, 0.05)).toBe(false);
     // The option is off.
     expect(trapFlag("?", mistake, 0.55, undefined)).toBe(false);
+});
+
+test("toBestLineNodes reports the number the choice was made on", async () => {
+    const nodes = toBestLineNodes(await tree({ maxPlies: 2 }), { mode: "line", risk: 1 });
+    const chosen = nodes[0];
+    expect(chosen.value).toBeGreaterThan(0);
+    // The risk penalty only ever lowers it, and the raw score is a third number.
+    expect(chosen.bound).toBeLessThan(chosen.value!);
+    expect(chosen.bound).not.toBeCloseTo(chosen.stats!.score, 6);
+    for (const candidate of chosen.candidates) {
+        if (candidate.value === undefined) continue;
+        expect(candidate.bound).toBeLessThanOrEqual(candidate.value);
+    }
+});
+
+test("toBestLineNodes compares every candidate on the same number", async () => {
+    // Without risk aversion the decided number is the expected result itself.
+    const nodes = toBestLineNodes(await tree({ maxPlies: 2 }), { mode: "line", risk: 0 });
+    const chosen = nodes[0].candidates.find((c) => c.status === "chosen")!;
+    expect(chosen.bound).toBeCloseTo(chosen.value!, 10);
+    const ranked = nodes[0].candidates.filter((c) => c.bound !== undefined);
+    for (const other of ranked) {
+        if (other === chosen) continue;
+        expect(chosen.bound!).toBeGreaterThanOrEqual(other.bound! - 0.005);
+    }
 });

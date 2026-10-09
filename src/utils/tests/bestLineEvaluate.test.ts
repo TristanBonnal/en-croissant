@@ -1,0 +1,100 @@
+import { expect, test } from "vitest";
+import { evaluateLeaves } from "@/utils/bestLine/evaluate";
+import { toBestLineNodes } from "@/utils/bestLine/project";
+import { searchBestLine } from "@/utils/bestLine/search";
+import { fakeBook, fakeEngine, searchParams } from "./bestLineFixtures";
+
+async function searched(engine: ReturnType<typeof fakeEngine>, plies = 2) {
+    const book = fakeBook({ shares: [0.6, 0.3] });
+    const { root } = await searchBestLine(searchParams({ maxPlies: plies, preciseDepth: 18 }), {
+        explore: book.explore,
+        analyze: engine.analyze,
+    });
+    return root;
+}
+
+test("evaluateLeaves evaluates the positions the result ends on, at the fast depth", async () => {
+    const engine = fakeEngine([30, 20]);
+    const root = await searched(engine);
+    engine.analysed.length = 0;
+
+    const evaluated = await evaluateLeaves(root, { mode: "tree" }, { analyze: engine.analyze });
+
+    expect(evaluated).toBeGreaterThan(0);
+    expect(engine.analysed).toHaveLength(evaluated);
+    for (const request of engine.analysed) {
+        expect(request.purpose).toBe("evaluation");
+        expect(request.multipv).toBe(1);
+    }
+});
+
+test("evaluateLeaves keeps a single line's leaf only", async () => {
+    const engine = fakeEngine([30, 20]);
+    const root = await searched(engine, 4);
+    engine.analysed.length = 0;
+
+    const evaluated = await evaluateLeaves(root, { mode: "line" }, { analyze: engine.analyze });
+
+    expect(evaluated).toBe(1);
+});
+
+test("evaluateLeaves leaves an analysed position alone", async () => {
+    const engine = fakeEngine([30, 20]);
+    const root = await searched(engine);
+    engine.analysed.length = 0;
+
+    await evaluateLeaves(root, { mode: "tree" }, { analyze: engine.analyze });
+    const first = engine.analysed.length;
+    await evaluateLeaves(root, { mode: "tree" }, { analyze: engine.analyze });
+
+    // The second pass has nothing left to evaluate.
+    expect(engine.analysed).toHaveLength(first);
+});
+
+test("evaluateLeaves stops when the search is cancelled", async () => {
+    const engine = fakeEngine([30, 20]);
+    const root = await searched(engine);
+    engine.analysed.length = 0;
+
+    await evaluateLeaves(
+        root,
+        { mode: "tree" },
+        {
+            analyze: engine.analyze,
+            isCancelled: () => true,
+        },
+    );
+
+    expect(engine.analysed).toHaveLength(0);
+});
+
+test("the result shows the evaluation an opponent reply leads to", async () => {
+    const engine = fakeEngine([30, 20]);
+    const root = await searched(engine, 3);
+    await evaluateLeaves(root, { mode: "line" }, { analyze: engine.analyze });
+
+    const nodes = toBestLineNodes(root, { mode: "line", preciseDepth: 18 });
+    const reply = nodes[0].children[0];
+    expect(reply.color).toBe("black");
+    expect(reply.score).toBeDefined();
+    // An opponent reply is only ever evaluated quickly.
+    expect(reply.precise).toBeFalsy();
+});
+
+test("the result marks the studied side's evaluations that come from the precise depth", async () => {
+    const engine = fakeEngine([30, 20], { precise: [40, 20] });
+    const root = await searched(engine);
+    const nodes = toBestLineNodes(root, { mode: "line", preciseDepth: 18 });
+    // Only the fast candidate list ran, so nothing is precise yet.
+    expect(nodes[0].precise).toBeFalsy();
+
+    const { verifyChoices } = await import("@/utils/bestLine/verify");
+    await verifyChoices(
+        root,
+        { ...searchParams({ preciseDepth: 18 }), mode: "line" },
+        { analyze: engine.analyze },
+    );
+    const checked = toBestLineNodes(root, { mode: "line", preciseDepth: 18 });
+    expect(checked[0].precise).toBe(true);
+    expect(checked[0].score?.value).toEqual({ type: "cp", value: 40 });
+});

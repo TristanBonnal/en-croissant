@@ -12,6 +12,7 @@ import {
     type MoveStats,
 } from "@/utils/bestLine";
 import type { Edge, EdgeStatus, SearchNode } from "./node";
+import { lowerBound } from "./value";
 import { drawWeightOf, expectedScore, type Metric, ratesOf, totalGames } from "./stats";
 
 /**
@@ -24,6 +25,10 @@ import { drawWeightOf, expectedScore, type Metric, ratesOf, totalGames } from ".
 export type OutputOptions = {
     mode: "line" | "tree";
     metric?: Metric;
+    /** Depth from which an evaluation counts as precise. */
+    preciseDepth?: number;
+    /** Standard errors taken off a value before comparing it. */
+    risk?: number;
     /** When set, an opponent mistake played at least this often is a trap. */
     trapMinShare?: number;
 };
@@ -43,14 +48,31 @@ export function trapFlag(
     return isTrapMistake(annotation, stats, positionScore);
 }
 
-/** Engine evaluation of a position, from the candidates analysed there. */
+/**
+ * Engine evaluation of a position: the best of the candidates analysed there,
+ * or the one measured for the position itself when it ends a branch.
+ */
 function evaluationOf(node: SearchNode | undefined): Score | undefined {
     if (!node) return undefined;
     const mover = turnOf(node.fen);
     const scores = (node.edges ?? []).flatMap((edge) => (edge.score ? [edge.score] : []));
-    if (scores.length === 0) return node.parent?.edge.score;
+    if (scores.length === 0) return node.evaluation;
     return scores.reduce((best, score) =>
         normalizeScore(score.value, mover) > normalizeScore(best.value, mover) ? score : best,
+    );
+}
+
+/** Evaluation to show for a move: its own line, else the position it leads to. */
+function scoreOf(edge: Edge): Score | undefined {
+    return edge.score ?? evaluationOf(edge.child);
+}
+
+function isPrecise(edge: Edge, preciseDepth: number | undefined): boolean {
+    return (
+        edge.score !== undefined &&
+        preciseDepth !== undefined &&
+        edge.depth !== undefined &&
+        edge.depth >= preciseDepth
     );
 }
 
@@ -92,8 +114,8 @@ function statsOf(edge: Edge, node: SearchNode, mover: Color, studied: Color, met
 
 function reasonOf(edge: Edge, node: SearchNode): MoveReason {
     if (edge.forced) return "manual";
-    if (!node.studied) return node.stopped === "outOfBook" ? "engine" : "popular";
-    return edge.value.source === "stats" ? "stats" : "engine";
+    if (!node.studied) return node.stopped === "outOfBook" ? "outOfBook" : "popular";
+    return edge.decidedBy ?? (edge.value.source === "stats" ? "score" : "engineChoice");
 }
 
 /** Moves of a node kept in the result, the one it plays first. */
@@ -117,12 +139,14 @@ export function toBestLineNodes(root: SearchNode, options: OutputOptions): BestL
         const mover = turnOf(node.fen);
         const candidates: Candidate[] = (node.edges ?? []).map((edge) => ({
             san: edge.san,
-            score: edge.score,
+            score: scoreOf(edge),
+            precise: isPrecise(edge, options.preciseDepth),
             stats: statsOf(edge, node, mover, studied, metric),
             value: edge.value.mean,
+            bound: lowerBound(edge.value, options.risk ?? 0),
             status: candidateStatus(edge.status),
         }));
-        const before = node.studied ? undefined : evaluationOf(node);
+        const before = node.studied ? undefined : (evaluationOf(node) ?? node.parent?.edge.score);
         const positionScore =
             node.rates && !node.studied
                 ? expectedScore(node.rates, drawWeightOf(metric))
@@ -140,8 +164,11 @@ export function toBestLineNodes(root: SearchNode, options: OutputOptions): BestL
                 color: mover,
                 fen: node.fen,
                 reason: trap ? ("trap" as MoveReason) : reasonOf(edge, node),
-                score: edge.score,
+                score: scoreOf(edge),
+                precise: isPrecise(edge, options.preciseDepth),
                 stats,
+                value: edge.value.mean,
+                bound: lowerBound(edge.value, options.risk ?? 0),
                 annotation,
                 trap: trap || undefined,
                 candidates,

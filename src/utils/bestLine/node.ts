@@ -42,6 +42,8 @@ export type Edge = {
     child?: SearchNode;
     /** Played because it was asked for, not because the search chose it. */
     forced?: boolean;
+    /** Which criterion picked this move, while it is the chosen one. */
+    decidedBy?: "score" | "mostPlayed" | "onlyMove" | "engineChoice" | "outOfBook";
     /** Expansions carried out in its subtree. */
     expansions: number;
 };
@@ -65,6 +67,8 @@ export type SearchNode = {
     /** Games the opponent's shares are measured on. */
     weightSamples?: number;
     value: Value;
+    /** Evaluation of the position itself, when it was analysed for its own sake. */
+    evaluation?: Score;
     stopped?: StopReason;
 };
 
@@ -155,12 +159,21 @@ function decide(node: SearchNode, options: BackupOptions): { value: Value; prune
     const tied = live.filter((e) => Math.abs(e.value.mean - leader.mean) <= options.indifference);
     const chosen = tied.reduce((a, b) => (totalGames(b.outcome) > totalGames(a.outcome) ? b : a));
 
+    // The criterion is recorded the first time a move is picked, while the
+    // candidates still stand on their own statistics: searching them changes
+    // their value, and dropping one would later erase the tie it lost.
+    if (chosen.decidedBy === undefined) {
+        chosen.decidedBy =
+            live.length === 1 ? "onlyMove" : tied.length > 1 ? "mostPlayed" : "score";
+    }
+
     let pruned = 0;
     for (const edge of live) {
         if (edge === chosen) {
             edge.status = "chosen";
             continue;
         }
+        edge.decidedBy = undefined;
         const drop = edge.expansions > 0 && cannotCatchUp(edge, chosen, options);
         if (drop && edge.status !== "pruned") pruned++;
         edge.status = drop ? "pruned" : "contender";

@@ -180,9 +180,9 @@ test("the search report counts the engine analyses by purpose and depth", async 
     const report = atoms.get(bestLineRunFamily(REPORT_TAB)).report!;
     expect(report.engine).toEqual({
         // One candidate list for our move; the opponent's reply comes from the
-        // explorer alone, so nothing is evaluated for it.
+        // explorer alone, and the position the line ends on is evaluated once.
         candidates: 1,
-        evaluation: 0,
+        evaluation: 1,
         // The stats choose 1.e4, so the engine only checks it at the precise depth.
         decision: 0,
         verification: 1,

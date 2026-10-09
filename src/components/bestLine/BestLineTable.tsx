@@ -69,19 +69,52 @@ function TrapBadge({ node }: { node: BestLineNode }) {
   );
 }
 
+/** Which criterion picked a move, with the rule behind it on hover. */
 function ReasonBadge({ reason }: { reason: MoveReason }) {
   const { t } = useTranslation();
-  const [color, label] = match(reason)
-    .with("stats", () => ["green", t("BestLine.Reason.Stats")])
-    .with("popular", () => ["gray", t("BestLine.Reason.Popular")])
-    .with("engine", () => ["blue", t("BestLine.Reason.Engine")])
-    .with("manual", () => ["violet", t("BestLine.Reason.Manual")])
-    .with("trap", () => ["red", t("BestLine.Reason.Trap")])
+  const [color, label, help] = match(reason)
+    .with("score", () => ["green", t("BestLine.Reason.Score"), t("BestLine.Reason.Score.Help")])
+    .with("mostPlayed", () => [
+      "green",
+      t("BestLine.Reason.MostPlayed"),
+      t("BestLine.Reason.MostPlayed.Help"),
+    ])
+    .with("onlyMove", () => [
+      "teal",
+      t("BestLine.Reason.OnlyMove"),
+      t("BestLine.Reason.OnlyMove.Help"),
+    ])
+    .with("engineChoice", () => [
+      "blue",
+      t("BestLine.Reason.EngineChoice"),
+      t("BestLine.Reason.EngineChoice.Help"),
+    ])
+    .with("outOfBook", () => [
+      "indigo",
+      t("BestLine.Reason.OutOfBook"),
+      t("BestLine.Reason.OutOfBook.Help"),
+    ])
+    .with("popular", () => [
+      "gray",
+      t("BestLine.Reason.Popular"),
+      t("BestLine.Reason.Popular.Help"),
+    ])
+    .with("trap", () => ["red", t("BestLine.Reason.Trap"), t("BestLine.Reason.Trap.Help")])
+    .with("manual", () => ["violet", t("BestLine.Reason.Manual"), t("BestLine.Reason.Manual.Help")])
+    // Results stored by an older version.
+    .with("stats", () => ["green", t("BestLine.Reason.Stats"), t("BestLine.Reason.Score.Help")])
+    .with("engine", () => [
+      "blue",
+      t("BestLine.Reason.Engine"),
+      t("BestLine.Reason.EngineChoice.Help"),
+    ])
     .exhaustive();
   return (
-    <Badge size="sm" color={color} variant="light">
-      {label}
-    </Badge>
+    <Tooltip label={help} multiline w={280} withArrow>
+      <Badge size="sm" color={color} variant="light" style={{ cursor: "help" }}>
+        {label}
+      </Badge>
+    </Tooltip>
   );
 }
 
@@ -101,11 +134,39 @@ function StatusBadge({ status }: { status: CandidateStatus }) {
   );
 }
 
-function StatsCells({ score, stats }: Pick<Candidate, "score" | "stats">) {
+function StatsCells({
+  score,
+  stats,
+  precise,
+  value,
+  bound,
+}: Pick<Candidate, "score" | "stats" | "precise" | "value" | "bound">) {
+  const { t } = useTranslation();
   return (
     <>
-      <Table.Td>{score ? formatScore(score.value) : "-"}</Table.Td>
+      {/* Blue marks an evaluation that comes from the precise depth. */}
+      <Table.Td c={precise ? "blue" : undefined} fw={precise ? 500 : undefined}>
+        {score ? formatScore(score.value) : "-"}
+      </Table.Td>
       <Table.Td>{stats ? formatPercent(stats.score) : "-"}</Table.Td>
+      {/* The number the choice is actually made on. */}
+      <Table.Td>
+        {value === undefined ? (
+          "-"
+        ) : (
+          <Tooltip
+            label={t("BestLine.Table.Decided.Tooltip", {
+              value: formatPercent(value),
+              bound: formatPercent(bound ?? value),
+            })}
+            multiline
+            w={280}
+            withArrow
+          >
+            <span style={{ cursor: "help" }}>{formatPercent(bound ?? value)}</span>
+          </Tooltip>
+        )}
+      </Table.Td>
       <Table.Td>{stats ? formatPercent(stats.share) : "-"}</Table.Td>
       <Table.Td>{stats ? formatNumber(stats.games) : "-"}</Table.Td>
     </>
@@ -129,7 +190,7 @@ function AlternativeRows({
   if (node.candidates.length === 0) {
     return (
       <Table.Tr style={style}>
-        <Table.Td colSpan={7}>
+        <Table.Td colSpan={8}>
           <Text size="xs" c="dimmed" pl={`${indent + 1.4}rem`}>
             {t("BestLine.NoAlternatives")}
           </Text>
@@ -144,17 +205,15 @@ function AlternativeRows({
           ↳ {c.san}
         </Text>
       </Table.Td>
-      <StatsCells score={c.score} stats={c.stats} />
+      <StatsCells
+        score={c.score}
+        stats={c.stats}
+        precise={c.precise}
+        value={c.value}
+        bound={c.bound}
+      />
       <Table.Td>
-        {c.value !== undefined ? (
-          <Tooltip label={t("BestLine.Value", { value: formatPercent(c.value) })}>
-            <Box>
-              <StatusBadge status={c.status} />
-            </Box>
-          </Tooltip>
-        ) : (
-          <StatusBadge status={c.status} />
-        )}
+        <StatusBadge status={c.status} />
       </Table.Td>
       <Table.Td>
         {c.san !== node.san && (
@@ -211,9 +270,22 @@ export default function BestLineTable({
       <Table.Thead>
         <Table.Tr>
           <Table.Th>{t("BestLine.Table.Move")}</Table.Th>
-          <Table.Th>{t("BestLine.Table.Eval")}</Table.Th>
+          <Table.Th>
+            <Tooltip label={t("BestLine.Table.Eval.Help")} multiline w={280} withArrow>
+              <span style={{ textDecoration: "underline dotted", cursor: "help" }}>
+                {t("BestLine.Table.Eval")}
+              </span>
+            </Tooltip>
+          </Table.Th>
           <Table.Th>
             {t(metric === "wins" ? "BestLine.Table.Winrate" : "BestLine.Table.Score")}
+          </Table.Th>
+          <Table.Th>
+            <Tooltip label={t("BestLine.Table.Decided.Help")} multiline w={300} withArrow>
+              <span style={{ textDecoration: "underline dotted", cursor: "help" }}>
+                {t("BestLine.Table.Decided")}
+              </span>
+            </Tooltip>
           </Table.Th>
           <Table.Th>{t("BestLine.Table.Share")}</Table.Th>
           <Table.Th>{t("Common.Games")}</Table.Th>
@@ -251,7 +323,13 @@ export default function BestLineTable({
                     </UnstyledButton>
                   </Group>
                 </Table.Td>
-                <StatsCells score={node.score} stats={node.stats} />
+                <StatsCells
+                  score={node.score}
+                  stats={node.stats}
+                  precise={node.precise}
+                  value={node.value}
+                  bound={node.bound}
+                />
                 <Table.Td>
                   <Group gap={4} wrap="nowrap">
                     <ReasonBadge reason={node.reason} />
