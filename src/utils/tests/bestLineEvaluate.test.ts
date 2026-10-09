@@ -6,7 +6,7 @@ import { fakeBook, fakeEngine, searchParams } from "./bestLineFixtures";
 
 async function searched(engine: ReturnType<typeof fakeEngine>, plies = 2) {
     const book = fakeBook({ shares: [0.6, 0.3] });
-    const { root } = await searchBestLine(searchParams({ maxPlies: plies, preciseDepth: 18 }), {
+    const { root } = await searchBestLine(searchParams({ maxPlies: plies }), {
         explore: book.explore,
         analyze: engine.analyze,
     });
@@ -81,20 +81,11 @@ test("the result shows the evaluation an opponent reply leads to", async () => {
     expect(reply.precise).toBeFalsy();
 });
 
-test("the result marks the studied side's evaluations that come from the precise depth", async () => {
+test("the result marks the studied side's evaluations as coming from the precise depth", async () => {
     const engine = fakeEngine([30, 20], { precise: [40, 20] });
     const root = await searched(engine);
     const nodes = toBestLineNodes(root, { mode: "line", preciseDepth: 18 });
-    // Only the fast candidate list ran, so nothing is precise yet.
-    expect(nodes[0].precise).toBeFalsy();
-
-    const { verifyChoices } = await import("@/utils/bestLine/verify");
-    await verifyChoices(
-        root,
-        { ...searchParams({ preciseDepth: 18 }), mode: "line" },
-        { analyze: engine.analyze },
-    );
-    const checked = toBestLineNodes(root, { mode: "line", preciseDepth: 18 });
-    expect(checked[0].precise).toBe(true);
-    expect(checked[0].score?.value).toEqual({ type: "cp", value: 40 });
+    // The candidates are always analysed at the precise depth.
+    expect(nodes[0].precise).toBe(true);
+    expect(nodes[0].score?.value).toEqual({ type: "cp", value: 40 });
 });

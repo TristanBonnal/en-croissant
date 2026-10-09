@@ -445,9 +445,6 @@ export type SearchReport = {
     outOfBook: number;
     /** Share of the games the tree accounts for. */
     coverage: number;
-    /** Positions checked again at the precise depth, and choices it changed. */
-    checked: number;
-    changed: number;
     /** Whether the search stopped on its last-resort limit. */
     exhausted: boolean;
 };
@@ -476,9 +473,12 @@ export const idleBestLineRun: BestLineRun = {
 /** Progress of the "find the best line" search of a tab (kept while switching tabs). */
 export const bestLineRunFamily = atomFamily((_tab: string) => atom<BestLineRun>(idleBestLineRun));
 
+/** Whether the live analysis of a tab follows the moves played on its board. */
+export const bestLineLiveFamily = atomFamily((_tab: string) => atom(false));
+
 /** Sub-tab shown in the "find the best line" panel of a tab. */
 export const bestLinePanelTabFamily = atomFamily((_tab: string) =>
-    atom<"settings" | "result">("settings"),
+    atom<"settings" | "result" | "live">("settings"),
 );
 
 export type BestLineResult = {

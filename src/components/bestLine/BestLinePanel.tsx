@@ -23,6 +23,7 @@ import {
 } from "@mantine/core";
 import { useDisclosure } from "@mantine/hooks";
 import {
+  IconActivity,
   IconAdjustments,
   IconBookmarkPlus,
   IconInfoCircle,
@@ -46,6 +47,7 @@ import FenInput from "@/components/panels/info/FenInput";
 import { useExplorerToken } from "@/hooks/useExplorerToken";
 import { useOpenInAnalysis } from "@/hooks/useOpenInAnalysis";
 import {
+  bestLineLiveFamily,
   bestLinePanelTabFamily,
   bestLineResultFamily,
   bestLineRunFamily,
@@ -68,15 +70,20 @@ import { getNodeAtPath } from "@/utils/treeReducer";
 import AddToRepertoireModal from "./AddToRepertoireModal";
 import BestLineTable from "./BestLineTable";
 import ImportPgn from "./ImportPgn";
+import LiveAnalysis from "./LiveAnalysis";
 import { reportRows } from "./report";
 import {
   cancelBestLine,
   extendLine,
   goToResultMove,
+  liveKeyOf,
+  resetLiveSearch,
   replayMove,
   resetBestLine,
   type SearchConfig,
   startBestLine,
+  startLiveSearch,
+  stopLiveSearch,
 } from "./runner";
 
 const EXPLORER_MOVES = 30;
@@ -111,6 +118,7 @@ function settingsSummary(settings: BestLineSettings, t: TFunction) {
     }),
     t(settings.metric === "wins" ? "BestLine.Metric.Wins" : "BestLine.Metric.Score"),
     t("BestLine.Summary.PerMove", { games: formatNumber(settings.minGamesPerMove) }),
+    t("BestLine.Summary.MoveShare", { share: Math.round(settings.minMoveShare * 1000) / 10 }),
     t("BestLine.Summary.Position", { games: formatNumber(settings.minimumGames) }),
   ];
   parts.push(
@@ -205,6 +213,20 @@ function AdvancedSettings({ settings, update }: { settings: BestLineSettings; up
         />
         <NumberInput
           label={
+            <HelpLabel label={t("BestLine.MinMoveShare")} help={t("BestLine.MinMoveShare.Help")} />
+          }
+          description={t("BestLine.MinMoveShare.Desc")}
+          min={0}
+          max={100}
+          step={0.5}
+          decimalScale={1}
+          suffix="%"
+          allowNegative={false}
+          value={Math.round(settings.minMoveShare * 1000) / 10}
+          onChange={(v) => update("minMoveShare", (Number(v) || 0) / 100)}
+        />
+        <NumberInput
+          label={
             <HelpLabel label={t("BestLine.MinimumGames")} help={t("BestLine.MinimumGames.Help")} />
           }
           description={t("BestLine.MinimumGames.Desc")}
@@ -261,12 +283,6 @@ function AdvancedSettings({ settings, update }: { settings: BestLineSettings; up
           />
         )}
         <Checkbox
-          label={t("BestLine.VerifyFastChoice")}
-          description={t("BestLine.VerifyFastChoice.Desc")}
-          checked={settings.verifyFastChoice}
-          onChange={(e) => update("verifyFastChoice", e.currentTarget.checked)}
-        />
-        <Checkbox
           label={t("BestLine.UseCloudEval")}
           description={t("BestLine.UseCloudEval.Desc")}
           checked={settings.useCloudEval}
@@ -322,6 +338,8 @@ function BestLinePanel({ id }: { id: string }) {
   );
   const result = useAtomValue(bestLineResultFamily(id));
   const [panelTab, setPanelTab] = useAtom(bestLinePanelTabFamily(id));
+  const [liveOn, setLiveOn] = useAtom(bestLineLiveFamily(id));
+  const [liveEpoch, setLiveEpoch] = useState(0);
   const [fromBoard, setFromBoard] = useState(false);
   const [repertoireOpened, repertoireModal] = useDisclosure(false);
   const [resetOpened, resetModal] = useDisclosure(false);
@@ -349,6 +367,21 @@ function BestLinePanel({ id }: { id: string }) {
       ? t("BestLine.Blocked.NoAccount")
       : null;
   const canRun = !blocker && !running;
+
+  // The live analysis searches again from every position the board comes to.
+  // It waits a moment, so that going through moves quickly searches only the last.
+  const liveKey = liveKeyOf(id);
+  useEffect(() => {
+    const c = liveOn && !blocker ? config() : null;
+    if (!c) {
+      stopLiveSearch(liveKey);
+      return;
+    }
+    const timer = setTimeout(() => void startLiveSearch(liveKey, c, currentFen), 300);
+    return () => clearTimeout(timer);
+    // biome-ignore lint: `config` is rebuilt at every render
+  }, [liveOn, liveEpoch, blocker, currentFen, settings, lichessOptions, engine?.id, liveKey]);
+  useEffect(() => () => stopLiveSearch(liveKey), [liveKey]);
 
   function run(action: (c: SearchConfig) => void) {
     const c = config();
@@ -473,7 +506,7 @@ function BestLinePanel({ id }: { id: string }) {
 
       <Tabs
         value={panelTab}
-        onChange={(v) => setPanelTab((v as "settings" | "result") ?? "settings")}
+        onChange={(v) => setPanelTab((v as "settings" | "result" | "live") ?? "settings")}
         keepMounted={false}
         flex={1}
         style={{ display: "flex", flexDirection: "column", minHeight: 0 }}
@@ -494,6 +527,9 @@ function BestLinePanel({ id }: { id: string }) {
             }
           >
             {t("BestLine.Tab.Result")}
+          </Tabs.Tab>
+          <Tabs.Tab value="live" leftSection={<IconActivity size="1rem" />}>
+            {t("BestLine.Tab.Live")}
           </Tabs.Tab>
         </Tabs.List>
 
@@ -576,6 +612,25 @@ function BestLinePanel({ id }: { id: string }) {
                 </Accordion.Item>
               </Accordion>
             </Stack>
+          </ScrollArea>
+        </Tabs.Panel>
+
+        <Tabs.Panel value="live" flex={1} style={{ minHeight: 0 }}>
+          <ScrollArea h="100%" offsetScrollbars>
+            <LiveAnalysis
+              tab={id}
+              on={liveOn}
+              onChange={setLiveOn}
+              blocker={blocker}
+              boardFen={currentFen}
+              lookahead={settings.liveMoves}
+              onLookahead={(moves) => update("liveMoves", moves)}
+              studied={settings.color}
+              onReset={() => {
+                resetLiveSearch(liveKey);
+                setLiveEpoch((n) => n + 1);
+              }}
+            />
           </ScrollArea>
         </Tabs.Panel>
 

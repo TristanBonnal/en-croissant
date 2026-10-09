@@ -51,7 +51,7 @@ export function fakeEngine(
     const analysed: (Request & { fen: string })[] = [];
     const analyze = async (fen: string, request: Request) => {
         analysed.push({ fen, ...request });
-        const deep = request.purpose === "decision" || request.purpose === "verification";
+        const deep = request.purpose === "decision" || request.purpose === "candidates";
         const values = cpsOf?.(fen) ?? (deep && precise ? precise : cps);
         const legal = legalSans(fen, 1000).map((san, rank) => ({
             san,
@@ -88,6 +88,7 @@ export function searchParams(overrides: Partial<SearchParams> = {}): SearchParam
         metric: "score",
         minimumGames: 5000,
         minGamesPerMove: 100,
+        minMoveShare: 0,
         minReach: 0.02,
         shrinkage: 100,
         risk: 1,

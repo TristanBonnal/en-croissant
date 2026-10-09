@@ -22,11 +22,11 @@ export function reportRows(report: SearchReport, t: TFunction): { label: string;
         { label: t("BestLine.Report.Cloud"), value: `${report.cloud}` },
         {
             label: t("BestLine.Report.Fast", { depth: report.fastDepth }),
-            value: `${engine.candidates + engine.evaluation}`,
+            value: `${engine.evaluation}`,
         },
         {
             label: t("BestLine.Report.Precise", { depth: report.preciseDepth }),
-            value: `${engine.decision + engine.verification}`,
+            value: `${engine.candidates + engine.decision}`,
         },
     ];
 }

@@ -21,7 +21,6 @@ export const bestLineSettingsSchema = z.object({
     engine: z.string().default(""),
     depth: z.number().int().min(1).default(18),
     fastDepth: z.number().int().min(1).default(14),
-    verifyFastChoice: z.boolean().default(true),
     fullMoves: z.number().int().min(1).default(6),
     mode: z.enum(["line", "tree"]).default("line"),
     /** Share of the games a line must be reached in to be searched. */
@@ -35,6 +34,10 @@ export const bestLineSettingsSchema = z.object({
     useCloudEval: z.boolean().default(true),
     minimumGames: z.number().int().min(0).default(5000),
     minGamesPerMove: z.number().int().min(0).default(100),
+    /** Moves of the studied side the live analysis looks at to choose its move. */
+    liveMoves: z.number().int().min(1).max(6).default(2),
+    /** Share of the position's games a move needs to be ranked on its results. */
+    minMoveShare: z.number().min(0).max(1).default(0.01),
 });
 
 export type BestLineSettings = z.infer<typeof bestLineSettingsSchema>;
@@ -146,18 +149,16 @@ export type BestLineNode = MoveChoice & {
 
 /** What the search needs an engine analysis for, which sets the depth it runs at. */
 export type AnalysisPurpose =
-    /** Lists the moves the stats can choose from, at the fast depth. */
+    /** Checks the moves of the studied side against the engine's best, at the precise depth. */
     | "candidates"
     /** Evaluates a position whose move was played without the engine, at the fast depth. */
     | "evaluation"
     /** Chooses the move when the stats can't, at the precise depth. */
-    | "decision"
-    /** Checks at the precise depth a move chosen on the stats. */
-    | "verification";
+    | "decision";
 
 /** Whether an analysis for `purpose` runs at the precise depth. */
 export function isPreciseAnalysis(purpose: AnalysisPurpose) {
-    return purpose === "decision" || purpose === "verification";
+    return purpose === "decision" || purpose === "candidates";
 }
 
 /**
@@ -202,6 +203,19 @@ export function isTrapMistake(
 
 export function isTrap(node: Pick<BestLineNode, "trap">): boolean {
     return node.trap === true;
+}
+
+/** Whether `color` is to move in the position. */
+export function isTurnOf(fen: string, color: Color): boolean {
+    return fen.split(" ")[1] === (color === "white" ? "w" : "b");
+}
+
+/** The first `depth` levels of a result: what lies deeper only served to choose them. */
+export function truncateNodes(nodes: BestLineNode[], depth: number): BestLineNode[] {
+    return nodes.map((node) => ({
+        ...node,
+        children: depth > 1 ? truncateNodes(node.children, depth - 1) : [],
+    }));
 }
 
 /** Whether cloud lines can replace a local analysis. */

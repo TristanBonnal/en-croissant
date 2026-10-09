@@ -19,6 +19,7 @@ import {
     cloudLinesUsable,
     fenAfter,
     isPreciseAnalysis,
+    isTurnOf,
     type LineCommentLabels,
     lineComment,
     type Metric,
@@ -27,6 +28,7 @@ import {
     sansAlong,
     sansTo,
     subtreeHeight,
+    truncateNodes,
     withRateLimitRetry,
 } from "@/utils/bestLine";
 import { evaluateLeaves } from "@/utils/bestLine/evaluate";
@@ -41,6 +43,7 @@ import {
 } from "@/utils/bestLine/search";
 import {
     analysisKey,
+    clearBestLineCaches,
     engineCache,
     explorerCache,
     memoizeAsync,
@@ -93,8 +96,13 @@ function keepSession(tab: string) {
     );
 }
 
+/** Key of the live analysis of a tab: its own search, run state and engine. */
+export const liveKeyOf = (tab: string) => `${tab}-live`;
+
 /** Stops the search of a closed tab and its engine. */
 export function releaseBestLine(tab: string) {
+    stopLiveSearch(liveKeyOf(tab));
+    commands.closeAnalysisSession(analysisId(liveKeyOf(tab)));
     cancelBestLine(tab);
     engineQueues.delete(tab);
     clearTimeout(sessionTimers.get(tab));
@@ -166,13 +174,14 @@ function searchParamsOf(
         metric: settings.metric,
         minimumGames: settings.minimumGames,
         minGamesPerMove: settings.minGamesPerMove,
+        minMoveShare: settings.minMoveShare,
+        trapMinShare:
+            settings.mode === "tree" && settings.trapBranching ? settings.trapMinShare : undefined,
         minReach: settings.reachThreshold,
         shrinkage: DEFAULT_SHRINKAGE,
         risk: DEFAULT_RISK,
         smoothing: DEFAULT_SMOOTHING,
-        preciseDepth: settings.depth,
         forcedMove,
-        verify: settings.verifyFastChoice ? settings.mode : undefined,
     };
 }
 
@@ -248,7 +257,7 @@ export function newSearchReport(settings: BestLineSettings): SearchReport {
         preciseDepth: settings.depth,
         cached: 0,
         cloud: 0,
-        engine: { candidates: 0, evaluation: 0, decision: 0, verification: 0 },
+        engine: { candidates: 0, evaluation: 0, decision: 0 },
         engineSeconds: 0,
         explorer: 0,
         explorerSeconds: 0,
@@ -257,8 +266,6 @@ export function newSearchReport(settings: BestLineSettings): SearchReport {
         lowReach: 0,
         outOfBook: 0,
         coverage: 0,
-        checked: 0,
-        changed: 0,
         exhausted: false,
     };
 }
@@ -325,17 +332,15 @@ export function formatSearchReport(report: SearchReport): string {
     return [
         `Best line search: ${round(report.seconds)} s for ${report.moves} moves`,
         `local engine: ${analyses} analyses in ${round(report.engineSeconds)} s ` +
-            `(fast depth ${report.fastDepth}: ${engine.candidates} candidate checks, ` +
-            `${engine.evaluation} position evaluations; ` +
-            `precise depth ${report.preciseDepth}: ${engine.decision} engine decisions, ` +
-            `${engine.verification} checks)`,
+            `(fast depth ${report.fastDepth}: ${engine.evaluation} position evaluations; ` +
+            `precise depth ${report.preciseDepth}: ${engine.candidates} candidate lists, ` +
+            `${engine.decision} engine decisions)`,
         `Lichess cloud: ${report.cloud} analyses, ${report.cached} reused from the cache`,
         `Lichess explorer: ${report.explorer} requests in ${round(report.explorerSeconds)} s`,
         `search: ${report.expanded} positions opened, ${report.pruned} candidates dropped, ` +
             `${report.lowReach} replies left closed, ${report.outOfBook} out of book, ` +
             `covering ${Math.round(report.coverage * 100)}% of the games` +
             (report.exhausted ? " (stopped on its limit)" : ""),
-        `checks: ${report.checked} positions re-analysed (${report.changed} changed)`,
     ].join(" | ");
 }
 
@@ -430,9 +435,6 @@ async function run(
         report.exhausted = stats.exhausted;
         report.coverage = coverageOf(root);
 
-        report.checked = stats.checked;
-        report.changed = stats.changed;
-
         // The search never analyses the opponent's positions, so the moves a
         // branch ends on get their evaluation here.
         await evaluateLeaves(root, { mode: config.settings.mode }, { analyze, isCancelled });
@@ -480,6 +482,54 @@ export function startBestLine(tab: string, config: SearchConfig, from?: number[]
             focus: [0],
         }),
     );
+}
+
+const liveRequests = new Map<string, number>();
+
+/**
+ * Chooses the move of the studied side in the position of the board, for the
+ * live analysis: it looks `liveMoves` of the studied side's moves ahead to
+ * judge each candidate, and keeps only the move itself. It has its own result
+ * and engine session, apart from the tab's search. A newer request replaces
+ * the one still running, and nothing is searched while it is the opponent's
+ * turn.
+ */
+export async function startLiveSearch(key: string, config: SearchConfig, fen: string) {
+    const request = (liveRequests.get(key) ?? 0) + 1;
+    liveRequests.set(key, request);
+    if (cancelFlags.has(key)) {
+        cancelBestLine(key);
+        while (cancelFlags.has(key)) await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    if (liveRequests.get(key) !== request || !isTurnOf(fen, config.settings.color)) return;
+
+    const live: SearchConfig = { ...config, settings: { ...config.settings, mode: "tree" } };
+    await run(key, live, searchParamsOf(live, fen, 2 * config.settings.liveMoves - 1), (nodes) => ({
+        fen,
+        color: config.settings.color,
+        metric: config.settings.metric,
+        startPath: [],
+        // The moves looked at beyond the first one only served to choose it.
+        nodes: truncateNodes(nodes, 1),
+        inserted: false,
+        focus: [0],
+    }));
+}
+
+/** Stops the live analysis, and forgets the requests still waiting. */
+export function stopLiveSearch(key: string) {
+    liveRequests.set(key, (liveRequests.get(key) ?? 0) + 1);
+    cancelBestLine(key);
+}
+
+/** Starts the live analysis over: nothing of its result, nor of any analysis, is kept. */
+export function resetLiveSearch(key: string) {
+    stopLiveSearch(key);
+    const store = getDefaultStore();
+    store.set(bestLineResultFamily(key), null);
+    store.set(bestLineRunFamily(key), idleBestLineRun);
+    clearBestLineCaches();
+    commands.closeAnalysisSession(analysisId(key));
 }
 
 /** Plays `san` instead of the move at `path` of the result, and searches on to the same depth. */

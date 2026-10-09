@@ -18,7 +18,7 @@ const report: SearchReport = {
     preciseDepth: 18,
     cached: 12,
     cloud: 31,
-    engine: { candidates: 6, evaluation: 9, decision: 2, verification: 4 },
+    engine: { candidates: 6, evaluation: 9, decision: 2 },
     engineSeconds: 23.2,
     explorer: 24,
     explorerSeconds: 3.4,
@@ -27,8 +27,6 @@ const report: SearchReport = {
     lowReach: 44,
     outOfBook: 3,
     coverage: 0.86,
-    checked: 9,
-    changed: 1,
     exhausted: false,
 };
 
@@ -39,10 +37,10 @@ test("reportRows sums the analyses of each depth", () => {
             value: "BestLine.Report.Minutes(minutes=2,seconds=05)",
         },
         { label: "BestLine.Report.Cloud", value: "31" },
-        // The candidate checks and the position evaluations run at the fast depth.
-        { label: "BestLine.Report.Fast(depth=14)", value: "15" },
-        // The engine decisions and the checks run at the precise depth.
-        { label: "BestLine.Report.Precise(depth=18)", value: "6" },
+        // Only the position evaluations run at the fast depth.
+        { label: "BestLine.Report.Fast(depth=14)", value: "9" },
+        // The candidate lists and the engine decisions run at the precise depth.
+        { label: "BestLine.Report.Precise(depth=18)", value: "8" },
     ]);
 });
 
@@ -61,7 +59,7 @@ test("reportRows shows a search that never reached the engine", () => {
         {
             ...report,
             cloud: 0,
-            engine: { candidates: 0, evaluation: 0, decision: 0, verification: 0 },
+            engine: { candidates: 0, evaluation: 0, decision: 0 },
         },
         t,
     );

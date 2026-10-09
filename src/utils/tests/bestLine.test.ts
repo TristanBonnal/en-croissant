@@ -5,6 +5,8 @@ import { createTreeStore } from "@/state/store/tree";
 import {
     admissibleMoves,
     type BestLineNode,
+    isTurnOf,
+    truncateNodes,
     fenAfter,
     bestLineSettingsSchema,
     cloudLinesUsable,
@@ -435,4 +437,23 @@ test("resultPathOf finds the moves of a result", () => {
     expect(resultPathOf(forest(), ["e4", "e5", "Nf3"])).toEqual([0, 0, 0]);
     expect(resultPathOf(forest(), ["e4", "d5"])).toBeNull();
     expect(resultPathOf(forest(), [])).toBeNull();
+});
+
+// --- truncating a result -----------------------------------------------------
+
+test("truncateNodes keeps the first levels of a result", () => {
+    const leaf = { san: "c", children: [] } as unknown as BestLineNode;
+    const mid = { san: "b", children: [leaf] } as unknown as BestLineNode;
+    const top = { san: "a", children: [mid] } as unknown as BestLineNode;
+    expect(truncateNodes([top], 1)).toEqual([{ san: "a", children: [] }]);
+    expect(truncateNodes([top], 2)).toEqual([{ san: "a", children: [{ san: "b", children: [] }] }]);
+    expect(truncateNodes([top], 5)).toEqual([top]);
+    // The result it was given is left alone.
+    expect(top.children).toHaveLength(1);
+});
+
+test("isTurnOf tells whether a side is to move", () => {
+    expect(isTurnOf(INITIAL_FEN, "white")).toBe(true);
+    expect(isTurnOf(INITIAL_FEN, "black")).toBe(false);
+    expect(isTurnOf(AFTER_E4, "black")).toBe(true);
 });
