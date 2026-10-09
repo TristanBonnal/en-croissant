@@ -134,9 +134,14 @@ export function backup(node: SearchNode, options: BackupOptions): { pruned: numb
     }
 }
 
-/** Value of an opponent node: its replies, weighted by how often they are played. */
+/**
+ * Value of an opponent node: its replies, weighted by how often they are played.
+ * The replies only listed are part of the games the rest stands for.
+ */
 function expectation(node: SearchNode): Value {
-    const parts = (node.edges ?? []).map((edge) => ({
+    const parts = (node.edges ?? [])
+        .filter((edge) => edge.status !== "other")
+        .map((edge) => ({
         weight: edge.probability,
         value: edge.value,
     }));
