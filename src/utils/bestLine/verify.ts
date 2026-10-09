@@ -7,9 +7,8 @@ import type { SearchDeps, SearchParams } from "./search";
 
 /**
  * Checks at the precise depth the moves the statistics chose. The fast
- * analysis only had to rule out the clearly bad ones; one deeper analysis,
- * restricted to the candidates and the engine's best move, says whether they
- * really are within tolerance. A candidate
+ * analysis only had to list plausible candidates; one deeper analysis,
+ * restricted to those candidates, says whether they really are. A candidate
  * the precise depth puts out of tolerance is dropped and the position is
  * decided again.
  */
@@ -58,13 +57,7 @@ export async function verifyChoices(
         if (candidates.length === 0) continue;
         if (candidates.every((edge) => (edge.depth ?? 0) >= options.preciseDepth!)) continue;
 
-        // The engine's best move, when it is no candidate, is what they are measured against.
-        const best = node.engineBest;
-        const reference =
-            best && !candidates.some((edge) => sanKey(edge.san) === sanKey(best.sanMoves[0]))
-                ? [best.uciMoves[0]]
-                : [];
-        const searchMoves = [...candidates.map((edge) => edge.uci), ...reference];
+        const searchMoves = candidates.map((edge) => edge.uci);
         const lines = await deps.analyze(node.fen, {
             purpose: "verification",
             multipv: searchMoves.length,
@@ -85,7 +78,11 @@ export async function verifyChoices(
             edge.depth = line.depth;
         }
 
-        const admissible = admissibleMoves(lines, turnOf(node.fen), options.tolerance);
+        const admissible = admissibleMoves(
+            found.map(({ line }) => line),
+            turnOf(node.fen),
+            options.tolerance,
+        );
         const dropped = found.filter(({ line }) => !admissible.includes(line));
         if (dropped.length === 0) continue;
         const choiceDropped = dropped.some(({ edge }) => edge.status === "chosen");

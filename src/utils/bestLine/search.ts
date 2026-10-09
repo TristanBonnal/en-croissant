@@ -19,6 +19,7 @@ import {
 } from "./node";
 import { legalMoveCount, playSan, positionOf, sanKey, uciOf } from "./position";
 import { moveProbabilities } from "./probability";
+import { verifyChoices } from "./verify";
 import {
     addOutcome,
     drawWeightOf,
@@ -45,6 +46,8 @@ import { DEFAULT_DRAW_RATE, engineValue, statsValue, terminalValue, type Value }
 const SIGMA_FLOOR = 0.01;
 /** Last-resort stop, for a search that would otherwise run for hours. */
 const MAX_EXPANDED = 3000;
+/** Most played moves of the studied side searched as candidates. */
+const MAX_CANDIDATES = 4;
 /** Opponent replies listed but not searched, for the result table. */
 const LISTED_REPLIES = 5;
 /** Positions next in line whose explorer data is fetched ahead of their turn. */
@@ -83,6 +86,11 @@ export type SearchParams = {
     preciseDepth?: number;
     /** Move played first instead of the one the search would choose. */
     forcedMove?: string;
+    /**
+     * Checks at the precise depth the moves the result plays (as shown in this
+     * mode), searching on below the moves that replace rejected ones.
+     */
+    verify?: "line" | "tree";
 };
 
 export type SearchStats = {
@@ -97,6 +105,9 @@ export type SearchStats = {
     cancelled: boolean;
     /** Whether the last-resort stop was reached. */
     exhausted: boolean;
+    /** Positions analysed again at the precise depth, and those whose move changed. */
+    checked: number;
+    changed: number;
 };
 
 export type SearchDeps = {
@@ -142,6 +153,8 @@ export async function searchBestLine(
         outOfBook: 0,
         cancelled: false,
         exhausted: false,
+        checked: 0,
+        changed: 0,
     };
     const frontier = new Frontier<SearchNode>();
 
@@ -237,10 +250,12 @@ export async function searchBestLine(
      * analysis at all.
      */
     async function expandStudied(node: SearchNode, explorer: ExplorerPosition) {
-        const enough = (move: ExplorerMove) =>
-            totalGames(outcomeOf(move, params.color)) >= params.minGamesPerMove;
+        const moveGames = (move: ExplorerMove) => totalGames(outcomeOf(move, params.color));
+        const enough = (move: ExplorerMove) => moveGames(move) >= params.minGamesPerMove;
         const contenders = explorer.moves
             .filter(enough)
+            .sort((a, b) => moveGames(b) - moveGames(a))
+            .slice(0, MAX_CANDIDATES)
             .map((move) => explorerEdge(node, move, "contender"));
         const listed = explorer.moves
             .filter((move) => !enough(move))
@@ -286,41 +301,42 @@ export async function searchBestLine(
 
     /**
      * Compares with the engine's best move the candidates still competing at a
-     * studied node: one analysis of the position, then one restricted to the
-     * candidates that are not the engine's choice. A candidate out of
-     * tolerance is dropped; when it was the chosen move, the ones dropped only
-     * for being worse than it compete again.
+     * studied node: one analysis of the position with as many lines as there
+     * are candidates, which usually covers them all since popular moves tend to
+     * be the engine's too, then one restricted to those it left out. A
+     * candidate out of tolerance is dropped; when it was the chosen move, the
+     * ones dropped only for being worse than it compete again.
      */
     async function checkCandidates(node: SearchNode) {
         const unchecked = liveEdges(node).filter((edge) => !edge.checked);
         if (unchecked.length === 0) return;
-        if (node.engineBest === undefined) {
-            const [best] = await deps.analyze(node.fen, { purpose: "candidates", multipv: 1 });
-            node.engineBest = best ?? null;
-        }
-        const best = node.engineBest;
+        node.engineLines ??= await deps.analyze(node.fen, {
+            purpose: "candidates",
+            multipv: unchecked.length,
+        });
+        const [best] = node.engineLines;
         if (!best) {
             for (const edge of unchecked) edge.checked = true;
             return;
         }
-        const isBest = (edge: Edge) => sanKey(edge.san) === sanKey(best.sanMoves[0]);
-        const others = unchecked.filter((edge) => !isBest(edge));
-        const lines =
-            others.length > 0
+        const lineOf = (edge: Edge, lines: BestMoves[]) =>
+            lines.find((line) => sanKey(line.sanMoves[0]) === sanKey(edge.san));
+        const missing = unchecked.filter((edge) => !lineOf(edge, node.engineLines!));
+        const restricted =
+            missing.length > 0
                 ? await deps.analyze(node.fen, {
                       purpose: "candidates",
-                      multipv: others.length,
-                      searchMoves: others.map((edge) => edge.uci),
+                      multipv: missing.length,
+                      searchMoves: missing.map((edge) => edge.uci),
                   })
                 : [];
-        const admissible = admissibleMoves([best, ...lines], turnOf(node.fen), params.tolerance);
+        const lines = [...node.engineLines, ...restricted];
+        const admissible = admissibleMoves(lines, turnOf(node.fen), params.tolerance);
 
         let choiceDropped = false;
         for (const edge of unchecked) {
             edge.checked = true;
-            const line = isBest(edge)
-                ? best
-                : lines.find((l) => sanKey(l.sanMoves[0]) === sanKey(edge.san));
+            const line = lineOf(edge, lines);
             // An engine that ignored the restriction tells us nothing about it.
             if (!line) continue;
             edge.score = line.score;
@@ -339,15 +355,20 @@ export async function searchBestLine(
     /** Puts back in competition a candidate dropped against a move that is now gone. */
     function revive(edge: Edge) {
         edge.status = "contender";
-        const walk = (node: SearchNode) => {
-            if (!node.edges) {
-                if (!node.stopped)
-                    frontier.push(node, node.reach * (node.value.sigma + SIGMA_FLOOR));
-                return;
-            }
-            for (const next of node.edges) if (next.child) walk(next.child);
-        };
-        if (edge.child) walk(edge.child);
+        if (edge.child) requeue(edge.child);
+    }
+
+    /**
+     * Queues again the positions left unopened below a node, which the search
+     * skipped while a move above them was dropped.
+     */
+    function requeue(node: SearchNode) {
+        if (!isLive(node)) return;
+        if (!node.edges) {
+            if (!node.stopped) frontier.push(node, node.reach * (node.value.sigma + SIGMA_FLOOR));
+            return;
+        }
+        for (const edge of node.edges) if (edge.child) requeue(edge.child);
     }
 
     /**
@@ -367,10 +388,21 @@ export async function searchBestLine(
         }
     }
 
+    /** The precise check of the moves played, after which the search goes on below their replacements. */
+    async function verifyPlayed() {
+        if (!params.verify || deps.isCancelled?.()) return;
+        const checks = await verifyChoices(root, { ...params, mode: params.verify }, deps);
+        stats.checked += checks.checked;
+        stats.changed += checks.changed;
+        if (checks.changed > 0) requeue(root);
+    }
+
     /** Checks the moves the tree ends up playing that the search never had to. */
     async function checkPlayed(node: SearchNode) {
         if (deps.isCancelled?.()) return;
         if (node.studied && node.edges) {
+            // Every candidate was rejected (at the precise depth): the engine decides.
+            if (liveEdges(node).length === 0 && !node.stopped) await engineDecides(node);
             let chosen = node.edges.find((edge) => edge.status === "chosen");
             while (chosen && !chosen.checked) {
                 await checkCandidates(node);
@@ -549,24 +581,30 @@ export async function searchBestLine(
     }
 
     await visit(root);
-    while (frontier.size > 0) {
-        if (deps.isCancelled?.()) {
-            stats.cancelled = true;
-            break;
+    for (;;) {
+        while (frontier.size > 0) {
+            if (deps.isCancelled?.()) {
+                stats.cancelled = true;
+                break;
+            }
+            if (stats.expanded >= MAX_EXPANDED) {
+                stats.exhausted = true;
+                break;
+            }
+            const node = frontier.pop();
+            // A revived candidate can bring back a position that is still queued.
+            if (!node || node.edges || node.stopped || !isLive(node)) continue;
+            prefetchAhead();
+            await checkPath(node);
+            if (!isLive(node)) continue;
+            await visit(node);
         }
-        if (stats.expanded >= MAX_EXPANDED) {
-            stats.exhausted = true;
-            break;
-        }
-        const node = frontier.pop();
-        // A revived candidate can bring back a position that is still queued.
-        if (!node || node.edges || node.stopped || !isLive(node)) continue;
-        prefetchAhead();
-        await checkPath(node);
-        if (!isLive(node)) continue;
-        await visit(node);
+        if (stats.cancelled) break;
+        // A move rejected now puts back positions to search, budget allowing.
+        await checkPlayed(root);
+        await verifyPlayed();
+        if (stats.exhausted || frontier.size === 0) break;
     }
-    await checkPlayed(root);
     return { root, stats };
 }
 

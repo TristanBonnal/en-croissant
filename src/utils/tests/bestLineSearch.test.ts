@@ -212,7 +212,7 @@ test("searchBestLine takes its candidates from the explorer, beyond the engine's
     expect(root.edges?.find((e) => e.status === "chosen")?.san).toBe(sixth);
 });
 
-test("searchBestLine checks a position with one line, then the other candidates only", async () => {
+test("searchBestLine checks the candidates with one analysis when the engine plays them too", async () => {
     const book = fakeBook({ shares: [0.3, 0.6] });
     const engine = fakeEngine([30, 20]);
     await searchBestLine(params({ maxPlies: 1 }), {
@@ -220,17 +220,27 @@ test("searchBestLine checks a position with one line, then the other candidates 
         analyze: engine.analyze,
     });
 
-    const [best, second] = legalSans(INITIAL_FEN, 2);
+    expect(engine.analysed).toEqual([{ fen: INITIAL_FEN, purpose: "candidates", multipv: 2 }]);
+});
+
+test("searchBestLine checks the candidates the engine's lines leave out on their own", async () => {
+    const book = fakeBook({ shares: [0.3, 0, 0, 0, 0, 0.6] });
+    const engine = fakeEngine([30, 25, 20, 15, 10, 5]);
+    await searchBestLine(params({ maxPlies: 1 }), {
+        explore: book.explore,
+        analyze: engine.analyze,
+    });
+
+    const sixth = legalSans(INITIAL_FEN, 6)[5];
     expect(engine.analysed).toEqual([
-        { fen: INITIAL_FEN, purpose: "candidates", multipv: 1 },
+        { fen: INITIAL_FEN, purpose: "candidates", multipv: 2 },
         {
             fen: INITIAL_FEN,
             purpose: "candidates",
             multipv: 1,
-            searchMoves: [uciOf(INITIAL_FEN, second)],
+            searchMoves: [uciOf(INITIAL_FEN, sixth)],
         },
     ]);
-    expect(best).not.toBe(second);
 });
 
 test("searchBestLine drops a candidate out of tolerance before searching below it", async () => {
@@ -264,6 +274,29 @@ test("searchBestLine never analyses a position it does not search below", async 
     };
     walk(root);
     for (const { fen } of engine.analysed) expect(searchedBelow.has(fen)).toBe(true);
+});
+
+test("searchBestLine searches on below a move that replaces one the precise depth rejects", async () => {
+    // The most played move is fine at the fast depth, not at the precise one.
+    const book = fakeBook({ shares: [0.3, 0.6] });
+    const engine = fakeEngine([30, 25], { precise: [30, -70] });
+    const { root, stats } = await searchBestLine(
+        params({ maxPlies: 4, preciseDepth: 18, verify: "line" }),
+        { explore: book.explore, analyze: engine.analyze },
+    );
+
+    const [best, rejected] = legalSans(INITIAL_FEN, 2);
+    expect(stats.changed).toBeGreaterThan(0);
+    expect(root.edges?.find((e) => e.san === rejected)?.status).toBe("outOfTolerance");
+    const chosen = root.edges?.find((e) => e.status === "chosen");
+    expect(chosen?.san).toBe(best);
+    // The line goes on to the last ply below the replacement.
+    let depth = 0;
+    for (let node = chosen?.child; node?.edges; depth++) {
+        const next = node.edges.find((e) => e.status === "chosen" || e.status === "reply");
+        node = next?.child;
+    }
+    expect(depth).toBe(3);
 });
 
 test("uciOf writes castling as the engine expects it", () => {

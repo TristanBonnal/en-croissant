@@ -38,7 +38,6 @@ import {
     searchBestLine,
     type SearchParams,
 } from "@/utils/bestLine/search";
-import { verifyChoices } from "@/utils/bestLine/verify";
 import {
     analysisKey,
     engineCache,
@@ -172,6 +171,7 @@ function searchParamsOf(
         smoothing: DEFAULT_SMOOTHING,
         preciseDepth: settings.depth,
         forcedMove,
+        verify: settings.verifyFastChoice ? settings.mode : undefined,
     };
 }
 
@@ -427,15 +427,8 @@ async function run(
         report.exhausted = stats.exhausted;
         report.coverage = coverageOf(root);
 
-        if (config.settings.verifyFastChoice && !isCancelled()) {
-            const checks = await verifyChoices(
-                root,
-                { ...params, mode: config.settings.mode },
-                { analyze, isCancelled },
-            );
-            report.checked = checks.checked;
-            report.changed = checks.changed;
-        }
+        report.checked = stats.checked;
+        report.changed = stats.changed;
 
         const nodes = toBestLineNodes(root, outputOptionsOf(config));
         report.moves = countNodes(nodes);

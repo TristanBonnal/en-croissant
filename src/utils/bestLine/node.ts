@@ -71,8 +71,8 @@ export type SearchNode = {
     weightSamples?: number;
     value: Value;
     stopped?: StopReason;
-    /** The engine's best line at the fast depth, which the candidates are checked against. */
-    engineBest?: BestMoves | null;
+    /** The engine's first lines at the fast depth, the best one being what candidates are checked against. */
+    engineLines?: BestMoves[];
 };
 
 export type BackupOptions = {
