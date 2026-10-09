@@ -23,6 +23,35 @@ export function memoizeAsync<T>(
 }
 
 /**
+ * Explorer requests of a search, memoized in `cache` under `keyOf(fen)`.
+ * `explore` always sends its request (the search waits on it); `prefetch`
+ * starts one ahead of need only while fewer than `concurrency` requests are
+ * running, a request waiting out a rate limit included, and otherwise declines
+ * so that it never queues behind the search or piles up on the rate limit.
+ */
+export function prefetchingExplorer<T>(
+    cache: Map<string, Promise<T>>,
+    keyOf: (fen: string) => string,
+    fetch: (fen: string) => Promise<T>,
+    concurrency: number,
+) {
+    let running = 0;
+    const explore = (fen: string) =>
+        memoizeAsync(cache, keyOf(fen), () => {
+            running++;
+            return fetch(fen).finally(() => running--);
+        });
+    const prefetch = (fen: string) => {
+        if (cache.has(keyOf(fen))) return true;
+        if (running >= concurrency) return false;
+        // A failure is forgotten by the cache and met again by `explore`.
+        explore(fen).catch(() => {});
+        return true;
+    };
+    return { explore, prefetch };
+}
+
+/**
  * Cache key of a position for the explorer: the move counters are dropped, as
  * Lichess ignores them, so transpositions share an entry.
  */

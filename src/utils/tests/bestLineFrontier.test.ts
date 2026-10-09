@@ -66,3 +66,13 @@ test("the frontier keeps entries pushed with the same priority", () => {
     expect(frontier.size).toBe(2);
     expect([frontier.pop(), frontier.pop()].sort()).toEqual([1, 2]);
 });
+
+test("the frontier peeks only at the entries it is asked to keep", () => {
+    const frontier = new Frontier<string>();
+    frontier.push("a", 0.2);
+    frontier.push("b", 0.9);
+    frontier.push("c", 0.5);
+    frontier.push("d", 0.1);
+    expect(frontier.peek(2, (item) => item !== "b")).toEqual(["c", "a"]);
+    expect(frontier.peek(10)).toEqual(["b", "c", "a", "d"]);
+});

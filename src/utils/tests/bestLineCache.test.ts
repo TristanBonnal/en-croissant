@@ -5,6 +5,7 @@ import {
     explorerCache,
     memoizeAsync,
     positionKey,
+    prefetchingExplorer,
 } from "../bestLineCache";
 
 test("memoizeAsync reuses the result of a previous call with the same key", async () => {
@@ -67,4 +68,44 @@ test("analysisKey keeps the halfmove clock, which changes an endgame evaluation"
     expect(analysisKey("8/8/8/4k3/8/8/4K3/7R w - - 40 60")).not.toBe(
         analysisKey("8/8/8/4k3/8/8/4K3/7R w - - 2 60"),
     );
+});
+
+test("prefetchingExplorer prefetches only while few requests run, and shares them", async () => {
+    const cache = new Map<string, Promise<string>>();
+    const pending: (() => void)[] = [];
+    let calls = 0;
+    const fetch = (fen: string) => {
+        calls++;
+        return new Promise<string>((resolve) => pending.push(() => resolve(fen)));
+    };
+    const { explore, prefetch } = prefetchingExplorer(cache, (fen) => fen, fetch, 2);
+
+    expect(prefetch("a")).toBe(true);
+    expect(prefetch("b")).toBe(true);
+    // Two requests are running: a third waits for its turn.
+    expect(prefetch("c")).toBe(false);
+    // The search's own request never waits, and a prefetched one is shared.
+    const c = explore("c");
+    const a = explore("a");
+    expect(calls).toBe(3);
+    for (const resolve of pending) resolve();
+    expect(await Promise.all([a, c])).toEqual(["a", "c"]);
+    // A position already fetched counts as prefetched.
+    expect(prefetch("b")).toBe(true);
+    expect(prefetch("d")).toBe(true);
+    expect(calls).toBe(4);
+});
+
+test("prefetchingExplorer forgets a failed prefetch so the search can retry it", async () => {
+    const cache = new Map<string, Promise<string>>();
+    let calls = 0;
+    const fetch = async (fen: string) => {
+        if (++calls === 1) throw new Error("network");
+        return fen;
+    };
+    const { explore, prefetch } = prefetchingExplorer(cache, (fen) => fen, fetch, 2);
+    prefetch("a");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await explore("a")).toBe("a");
+    expect(calls).toBe(2);
 });

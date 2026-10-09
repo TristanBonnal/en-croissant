@@ -73,6 +73,21 @@ test("backup of an opponent node mixes its replies and the games they leave out"
     expect(root.value.mean).toBeCloseTo(0.5 * 0.4 + 0.25 * 0.6 + 0.25 * 0.8, 10);
 });
 
+test("backup of an opponent node counts the replies it only lists once, in the rest", () => {
+    const replies = [
+        { ...edge("e5", value(0.4)), probability: 0.75, status: "reply" as const },
+        { ...edge("a6", value(0.9)), probability: 0.01, status: "other" as const },
+    ];
+    const root = node({
+        studied: false,
+        edges: replies,
+        rest: { weight: 0.25, value: value(0.8) },
+        weightSamples: Number.POSITIVE_INFINITY,
+    });
+    backup(root, options);
+    expect(root.value.mean).toBeCloseTo(0.75 * 0.4 + 0.25 * 0.8, 10);
+});
+
 test("backup walks up to the root", () => {
     const deep = node({ studied: false, value: value(0.7) });
     const chosen = edge("e4", value(0.55));

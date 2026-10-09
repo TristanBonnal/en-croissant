@@ -25,11 +25,20 @@ export class Frontier<T> {
         return entry.item;
     }
 
-    /** The `count` most urgent entries, left in place. */
-    peek(count: number): T[] {
-        return [...this.entries]
-            .sort((a, b) => b.priority - a.priority)
-            .slice(0, count)
-            .map((entry) => entry.item);
+    /**
+     * The `count` most urgent entries that pass `keep`, left in place. Picked
+     * by repeated scans rather than a sort, as `count` is small.
+     */
+    peek(count: number, keep: (item: T) => boolean = () => true): T[] {
+        const candidates = this.entries.filter((entry) => keep(entry.item));
+        const picked: T[] = [];
+        while (picked.length < count && candidates.length > 0) {
+            let best = 0;
+            for (let i = 1; i < candidates.length; i++) {
+                if (candidates[i].priority > candidates[best].priority) best = i;
+            }
+            picked.push(candidates.splice(best, 1)[0].item);
+        }
+        return picked;
     }
 }
