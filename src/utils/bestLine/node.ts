@@ -142,9 +142,9 @@ function expectation(node: SearchNode): Value {
     const parts = (node.edges ?? [])
         .filter((edge) => edge.status !== "other")
         .map((edge) => ({
-        weight: edge.probability,
-        value: edge.value,
-    }));
+            weight: edge.probability,
+            value: edge.value,
+        }));
     if (node.rest) parts.push(node.rest);
     return mixValue(parts, node.weightSamples ?? Number.POSITIVE_INFINITY);
 }
