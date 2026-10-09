@@ -7,7 +7,6 @@ import {
     type ExplorerPosition,
     type Tolerance,
 } from "@/utils/bestLine";
-import { Frontier } from "./frontier";
 import {
     backup,
     backupOptionsOf,
@@ -18,6 +17,8 @@ import {
     type SearchNode,
 } from "./node";
 import { legalMoveCount, playSan, positionOf, sanKey, uciOf } from "./position";
+import type { Frontier } from "./frontier";
+import { type Lookahead, nextPositions } from "./optimism";
 import { moveProbabilities } from "./probability";
 import { verifyChoices } from "./verify";
 import {
@@ -37,12 +38,12 @@ import { DEFAULT_DRAW_RATE, engineValue, statsValue, terminalValue, type Value }
 /**
  * The search. It grows a tree whose value is, at every position, the result the
  * studied side can expect *while playing the moves this tree recommends* — not
- * the average result of everyone who reached it. Positions are opened most
- * likely first, so the tree is usable at any moment, and a branch is never
+ * the average result of everyone who reached it. Positions are opened where
+ * they can still change a decision (`nextPositions`), and a branch is never
  * opened when a game reaches it less often than `minReach`.
  */
 
-/** Keeps the order of the frontier readable when every value is certain. */
+/** Uncertainty of the root before it is opened. */
 const SIGMA_FLOOR = 0.01;
 /** Last-resort stop, for a search that would otherwise run for hours. */
 const MAX_EXPANDED = 3000;
@@ -50,6 +51,8 @@ const MAX_EXPANDED = 3000;
 const MAX_CANDIDATES = 4;
 /** Opponent replies listed but not searched, for the result table. */
 const LISTED_REPLIES = 5;
+/** What choosing a move is hoped to add before any studied position was opened. */
+const FIRST_CHOICE_GAIN = 0.05;
 /** Positions next in line whose explorer data is fetched ahead of their turn. */
 const LOOKAHEAD = 4;
 
@@ -156,7 +159,6 @@ export async function searchBestLine(
         checked: 0,
         changed: 0,
     };
-    const frontier = new Frontier<SearchNode>();
 
     const root: SearchNode = {
         fen: params.fen,
@@ -191,11 +193,7 @@ export async function searchBestLine(
             value: edge.value,
         };
         edge.child = child;
-        if (child.ply >= params.maxPlies) {
-            child.stopped = "maxPly";
-            return;
-        }
-        frontier.push(child, reach * (edge.value.sigma + SIGMA_FLOOR));
+        if (child.ply >= params.maxPlies) child.stopped = "maxPly";
     }
 
     /** The single move the engine plays where the explorer knows too little. */
@@ -267,8 +265,25 @@ export async function searchBestLine(
             return;
         }
         for (const edge of contenders) attachChild(node, edge, node.reach);
+        recordGain(node, contenders);
         // Nothing will be searched below these moves, which would have checked them.
         if (node.ply + 1 >= params.maxPlies) await checkCandidates(node);
+    }
+
+    /**
+     * What choosing the move added at the studied positions opened so far, on
+     * average: the best candidate against the position's own result. Searching
+     * below a position is hoped to add as much at each studied position left.
+     */
+    const gains = { total: 0, count: 0 };
+    function recordGain(node: SearchNode, candidates: Edge[]) {
+        const best = Math.max(...candidates.map((edge) => edge.value.mean));
+        gains.total += Math.max(0, best - node.value.mean);
+        gains.count++;
+    }
+    function lookahead(): Lookahead {
+        const choiceGain = gains.count > 0 ? gains.total / gains.count : FIRST_CHOICE_GAIN;
+        return { maxPlies: params.maxPlies, choiceGain };
     }
 
     /** No candidate can be ranked on its results: the engine decides, at the precise depth. */
@@ -355,20 +370,6 @@ export async function searchBestLine(
     /** Puts back in competition a candidate dropped against a move that is now gone. */
     function revive(edge: Edge) {
         edge.status = "contender";
-        if (edge.child) requeue(edge.child);
-    }
-
-    /**
-     * Queues again the positions left unopened below a node, which the search
-     * skipped while a move above them was dropped.
-     */
-    function requeue(node: SearchNode) {
-        if (!isLive(node)) return;
-        if (!node.edges) {
-            if (!node.stopped) frontier.push(node, node.reach * (node.value.sigma + SIGMA_FLOOR));
-            return;
-        }
-        for (const edge of node.edges) if (edge.child) requeue(edge.child);
     }
 
     /**
@@ -394,7 +395,6 @@ export async function searchBestLine(
         const checks = await verifyChoices(root, { ...params, mode: params.verify }, deps);
         stats.checked += checks.checked;
         stats.changed += checks.changed;
-        if (checks.changed > 0) requeue(root);
     }
 
     /** Checks the moves the tree ends up playing that the search never had to. */
@@ -562,10 +562,10 @@ export async function searchBestLine(
      * in which positions are opened is unchanged, and so is the result.
      */
     const prefetched = new WeakSet<SearchNode>();
-    function prefetchAhead() {
+    function prefetchAhead(frontier: Frontier<SearchNode>) {
         const prefetch = deps.prefetch;
         if (!prefetch) return;
-        const next = frontier.peek(LOOKAHEAD, (node) => !prefetched.has(node) && isLive(node));
+        const next = frontier.peek(LOOKAHEAD, (node) => !prefetched.has(node));
         for (const node of next) {
             if (positionOf(node.fen)?.isEnd() !== false || prefetch(node.fen)) {
                 prefetched.add(node);
@@ -582,7 +582,7 @@ export async function searchBestLine(
 
     await visit(root);
     for (;;) {
-        while (frontier.size > 0) {
+        for (;;) {
             if (deps.isCancelled?.()) {
                 stats.cancelled = true;
                 break;
@@ -591,19 +591,19 @@ export async function searchBestLine(
                 stats.exhausted = true;
                 break;
             }
+            const frontier = nextPositions(root, options, lookahead());
             const node = frontier.pop();
-            // A revived candidate can bring back a position that is still queued.
-            if (!node || node.edges || node.stopped || !isLive(node)) continue;
-            prefetchAhead();
+            if (!node) break;
+            prefetchAhead(frontier);
             await checkPath(node);
             if (!isLive(node)) continue;
             await visit(node);
         }
         if (stats.cancelled) break;
-        // A move rejected now puts back positions to search, budget allowing.
+        // A move rejected now brings back positions to search, budget allowing.
         await checkPlayed(root);
         await verifyPlayed();
-        if (stats.exhausted || frontier.size === 0) break;
+        if (stats.exhausted || nextPositions(root, options, lookahead()).size === 0) break;
     }
     return { root, stats };
 }
