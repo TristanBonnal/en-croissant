@@ -227,7 +227,7 @@ test("formatSearchReport spells out where the search spent its time", () => {
         }),
     ).toBe(
         "Best line search: 42 s for 11 moves | " +
-            "local engine: 21 analyses in 23 s (fast depth 14: 6 candidate lists, 9 position evaluations; " +
+            "local engine: 21 analyses in 23 s (fast depth 14: 6 candidate checks, 9 position evaluations; " +
             "precise depth 18: 2 engine decisions, 4 checks) | " +
             "Lichess cloud: 31 analyses, 12 reused from the cache | " +
             "Lichess explorer: 24 requests in 3 s | " +

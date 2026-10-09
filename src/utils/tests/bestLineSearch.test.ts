@@ -1,6 +1,6 @@
 import { INITIAL_FEN } from "chessops/fen";
 import { expect, test } from "vitest";
-import { legalSans, playSan } from "@/utils/bestLine/position";
+import { legalSans, playSan, uciOf } from "@/utils/bestLine/position";
 import { coverageOf, searchBestLine } from "@/utils/bestLine/search";
 import { toBestLineNodes } from "@/utils/bestLine/project";
 import { mainBranch } from "@/utils/bestLine/tree";
@@ -196,6 +196,81 @@ test("searchBestLine finds the same tree when it fetches positions ahead", async
 });
 
 // --- coverage ----------------------------------------------------------------
+
+// --- candidates --------------------------------------------------------------
+
+test("searchBestLine takes its candidates from the explorer, beyond the engine's first lines", async () => {
+    // The most played move is the engine's sixth, still within tolerance.
+    const book = fakeBook({ shares: [0.05, 0.05, 0.05, 0.05, 0.05, 0.7] });
+    const engine = fakeEngine([30, 25, 20, 15, 10, 5]);
+    const { root } = await searchBestLine(params({ maxPlies: 1 }), {
+        explore: book.explore,
+        analyze: engine.analyze,
+    });
+
+    const sixth = legalSans(INITIAL_FEN, 6)[5];
+    expect(root.edges?.find((e) => e.status === "chosen")?.san).toBe(sixth);
+});
+
+test("searchBestLine checks a position with one line, then the other candidates only", async () => {
+    const book = fakeBook({ shares: [0.3, 0.6] });
+    const engine = fakeEngine([30, 20]);
+    await searchBestLine(params({ maxPlies: 1 }), {
+        explore: book.explore,
+        analyze: engine.analyze,
+    });
+
+    const [best, second] = legalSans(INITIAL_FEN, 2);
+    expect(engine.analysed).toEqual([
+        { fen: INITIAL_FEN, purpose: "candidates", multipv: 1 },
+        {
+            fen: INITIAL_FEN,
+            purpose: "candidates",
+            multipv: 1,
+            searchMoves: [uciOf(INITIAL_FEN, second)],
+        },
+    ]);
+    expect(best).not.toBe(second);
+});
+
+test("searchBestLine drops a candidate out of tolerance before searching below it", async () => {
+    // The most played move loses a pawn.
+    const book = fakeBook({ shares: [0.3, 0.6] });
+    const engine = fakeEngine([30, -70]);
+    const { root } = await searchBestLine(params({ maxPlies: 3 }), {
+        explore: book.explore,
+        analyze: engine.analyze,
+    });
+
+    const [best, bad] = legalSans(INITIAL_FEN, 2);
+    expect(root.edges?.find((e) => e.san === bad)?.status).toBe("outOfTolerance");
+    expect(root.edges?.find((e) => e.status === "chosen")?.san).toBe(best);
+    expect(book.explored).not.toContain(playSan(INITIAL_FEN, bad)?.fen);
+});
+
+test("searchBestLine never analyses a position it does not search below", async () => {
+    const book = fakeBook();
+    const engine = fakeEngine();
+    const { root } = await searchBestLine(params({ maxPlies: 6, minReach: 0.05 }), {
+        explore: book.explore,
+        analyze: engine.analyze,
+    });
+
+    const searchedBelow = new Set<string>();
+    const walk = (node: typeof root) => {
+        const below = (node.edges ?? []).some((edge) => edge.child?.edges);
+        if (node.studied && (below || node.ply + 1 >= 6)) searchedBelow.add(node.fen);
+        for (const edge of node.edges ?? []) if (edge.child) walk(edge.child);
+    };
+    walk(root);
+    for (const { fen } of engine.analysed) expect(searchedBelow.has(fen)).toBe(true);
+});
+
+test("uciOf writes castling as the engine expects it", () => {
+    const fen = "r1bqk1nr/pppp1ppp/2n5/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4";
+    expect(uciOf(fen, "O-O")).toBe("e1g1");
+    expect(uciOf(fen, "Nc3")).toBe("b1c3");
+});
 
 test("coverageOf measures the share of games the tree accounts for", async () => {
     const book = fakeBook({ shares: [0.6, 0.3] });

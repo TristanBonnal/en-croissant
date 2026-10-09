@@ -1,9 +1,9 @@
 import type { Color } from "chessops";
-import type { Chess } from "chessops/chess";
 import type { BestMoves } from "@/bindings";
 import {
     admissibleMoves,
     type AnalysisRequest,
+    type ExplorerMove,
     type ExplorerPosition,
     type Tolerance,
 } from "@/utils/bestLine";
@@ -14,9 +14,10 @@ import {
     type Edge,
     type EdgeStatus,
     isLive,
+    liveEdges,
     type SearchNode,
 } from "./node";
-import { legalMoveCount, playSan, positionOf, sanKey } from "./position";
+import { legalMoveCount, playSan, positionOf, sanKey, uciOf } from "./position";
 import { moveProbabilities } from "./probability";
 import {
     addOutcome,
@@ -210,60 +211,177 @@ export async function searchBestLine(
         attachChild(node, edge, node.reach);
     }
 
-    /** The move the search plays for the studied side, and the alternatives. */
-    async function expandStudied(node: SearchNode, position: Chess, explorer: ExplorerPosition) {
-        const lines = await deps.analyze(node.fen, { purpose: "candidates" });
-        if (lines.length === 0) {
-            node.stopped = "noMove";
-            return;
-        }
-        const admissible = admissibleMoves(lines, position.turn, params.tolerance);
-        const edges = lines.map((line): Edge => {
-            const san = line.sanMoves[0];
-            const outcome = moveOutcome(explorer, san, params.color);
-            const enough = totalGames(outcome) >= params.minGamesPerMove;
-            const status: EdgeStatus = !admissible.includes(line)
-                ? "outOfTolerance"
-                : enough
-                  ? "contender"
-                  : "fewGames";
-            return {
-                san,
-                uci: line.uciMoves[0],
-                outcome,
-                probability: 0,
-                score: line.score,
-                status,
-                depth: line.depth,
-                value:
-                    enough && node.rates
-                        ? statsValue(outcome, node.rates, params.shrinkage, drawWeight)
-                        : engineValue(line.score, params.color, drawWeight, drawRateOf(node)),
-                expansions: 0,
-            };
-        });
-        node.edges = edges;
+    /** A move of the explorer, as an edge of a studied node not compared with the engine yet. */
+    function explorerEdge(node: SearchNode, move: ExplorerMove, status: EdgeStatus): Edge {
+        const outcome = outcomeOf(move, params.color);
+        return {
+            san: move.san,
+            uci: uciOf(node.fen, move.san) ?? move.uci,
+            outcome,
+            probability: 0,
+            status,
+            value: node.rates
+                ? statsValue(outcome, node.rates, params.shrinkage, drawWeight)
+                : node.value,
+            expansions: 0,
+        };
+    }
 
-        const contenders = edges.filter((edge) => edge.status === "contender");
+    /**
+     * The move the search plays for the studied side, and the alternatives.
+     * Candidates are the moves played often enough to be ranked on their
+     * results, wherever the engine ranks them: a strong practical move is not
+     * left out for being the engine's sixth choice. Whether they are within
+     * the engine's tolerance is only checked once the search goes on below
+     * them (`checkCandidates`), so that positions it never gets to cost no
+     * analysis at all.
+     */
+    async function expandStudied(node: SearchNode, explorer: ExplorerPosition) {
+        const enough = (move: ExplorerMove) =>
+            totalGames(outcomeOf(move, params.color)) >= params.minGamesPerMove;
+        const contenders = explorer.moves
+            .filter(enough)
+            .map((move) => explorerEdge(node, move, "contender"));
+        const listed = explorer.moves
+            .filter((move) => !enough(move))
+            .slice(0, LISTED_REPLIES)
+            .map((move) => explorerEdge(node, move, "fewGames"));
+        node.edges = [...contenders, ...listed];
         if (contenders.length === 0) {
-            // No move has enough games: the engine decides, at the precise depth.
-            const deepEnough =
-                params.preciseDepth !== undefined &&
-                lines.every((line) => line.depth >= params.preciseDepth!);
-            const [precise] = deepEnough
-                ? lines
-                : await deps.analyze(node.fen, { purpose: "decision", multipv: 1 });
-            const best = precise ?? lines[0];
-            const chosen =
-                edges.find((edge) => sanKey(edge.san) === sanKey(best.sanMoves[0])) ??
-                edges[edges.length - 1];
-            chosen.score = best.score;
-            chosen.value = engineValue(best.score, params.color, drawWeight, drawRateOf(node));
-            chosen.status = "chosen";
-            attachChild(node, chosen, node.reach);
+            await engineDecides(node);
             return;
         }
         for (const edge of contenders) attachChild(node, edge, node.reach);
+        // Nothing will be searched below these moves, which would have checked them.
+        if (node.ply + 1 >= params.maxPlies) await checkCandidates(node);
+    }
+
+    /** No candidate can be ranked on its results: the engine decides, at the precise depth. */
+    async function engineDecides(node: SearchNode) {
+        const [best] = await deps.analyze(node.fen, { purpose: "decision", multipv: 1 });
+        if (!best) {
+            node.stopped = "noMove";
+            return;
+        }
+        const san = best.sanMoves[0];
+        const edges = node.edges ?? [];
+        const known = edges.find((edge) => sanKey(edge.san) === sanKey(san));
+        const chosen: Edge = known ?? {
+            san,
+            uci: best.uciMoves[0],
+            outcome: { wins: 0, draws: 0, losses: 0 },
+            probability: 0,
+            status: "chosen",
+            value: node.value,
+            expansions: 0,
+        };
+        chosen.score = best.score;
+        chosen.depth = best.depth;
+        chosen.checked = true;
+        chosen.status = "chosen";
+        chosen.value = engineValue(best.score, params.color, drawWeight, drawRateOf(node));
+        if (!known) node.edges = [chosen, ...edges];
+        attachChild(node, chosen, node.reach);
+    }
+
+    /**
+     * Compares with the engine's best move the candidates still competing at a
+     * studied node: one analysis of the position, then one restricted to the
+     * candidates that are not the engine's choice. A candidate out of
+     * tolerance is dropped; when it was the chosen move, the ones dropped only
+     * for being worse than it compete again.
+     */
+    async function checkCandidates(node: SearchNode) {
+        const unchecked = liveEdges(node).filter((edge) => !edge.checked);
+        if (unchecked.length === 0) return;
+        if (node.engineBest === undefined) {
+            const [best] = await deps.analyze(node.fen, { purpose: "candidates", multipv: 1 });
+            node.engineBest = best ?? null;
+        }
+        const best = node.engineBest;
+        if (!best) {
+            for (const edge of unchecked) edge.checked = true;
+            return;
+        }
+        const isBest = (edge: Edge) => sanKey(edge.san) === sanKey(best.sanMoves[0]);
+        const others = unchecked.filter((edge) => !isBest(edge));
+        const lines =
+            others.length > 0
+                ? await deps.analyze(node.fen, {
+                      purpose: "candidates",
+                      multipv: others.length,
+                      searchMoves: others.map((edge) => edge.uci),
+                  })
+                : [];
+        const admissible = admissibleMoves([best, ...lines], turnOf(node.fen), params.tolerance);
+
+        let choiceDropped = false;
+        for (const edge of unchecked) {
+            edge.checked = true;
+            const line = isBest(edge)
+                ? best
+                : lines.find((l) => sanKey(l.sanMoves[0]) === sanKey(edge.san));
+            // An engine that ignored the restriction tells us nothing about it.
+            if (!line) continue;
+            edge.score = line.score;
+            edge.depth = line.depth;
+            if (admissible.includes(line)) continue;
+            if (edge.status === "chosen") choiceDropped = true;
+            edge.status = "outOfTolerance";
+        }
+        if (choiceDropped) {
+            for (const edge of node.edges ?? []) if (edge.status === "pruned") revive(edge);
+        }
+        if (liveEdges(node).length === 0) await engineDecides(node);
+        stats.pruned += backup(node, options).pruned;
+    }
+
+    /** Puts back in competition a candidate dropped against a move that is now gone. */
+    function revive(edge: Edge) {
+        edge.status = "contender";
+        const walk = (node: SearchNode) => {
+            if (!node.edges) {
+                if (!node.stopped)
+                    frontier.push(node, node.reach * (node.value.sigma + SIGMA_FLOOR));
+                return;
+            }
+            for (const next of node.edges) if (next.child) walk(next.child);
+        };
+        if (edge.child) walk(edge.child);
+    }
+
+    /**
+     * Checks the candidates of the studied positions above a node about to be
+     * opened, from the root down, so that no position is searched below a
+     * move the engine rejects.
+     */
+    async function checkPath(node: SearchNode) {
+        const path: SearchNode[] = [];
+        for (let current = node; current.parent; current = current.parent.node) {
+            const parent = current.parent.node;
+            if (parent.studied && !current.parent.edge.checked) path.unshift(parent);
+        }
+        for (const studied of path) {
+            if (!isLive(node)) return;
+            await checkCandidates(studied);
+        }
+    }
+
+    /** Checks the moves the tree ends up playing that the search never had to. */
+    async function checkPlayed(node: SearchNode) {
+        if (deps.isCancelled?.()) return;
+        if (node.studied && node.edges) {
+            let chosen = node.edges.find((edge) => edge.status === "chosen");
+            while (chosen && !chosen.checked) {
+                await checkCandidates(node);
+                chosen = node.edges.find((edge) => edge.status === "chosen");
+            }
+            if (chosen?.child) await checkPlayed(chosen.child);
+            return;
+        }
+        for (const edge of node.edges ?? []) {
+            if (edge.status === "reply" && edge.child) await checkPlayed(edge.child);
+        }
     }
 
     /** The replies the opponent plays often enough to be worth preparing. */
@@ -369,7 +487,7 @@ export async function searchBestLine(
             await followEngine(node);
             return;
         }
-        if (node.studied) await expandStudied(node, position, explorer);
+        if (node.studied) await expandStudied(node, explorer);
         else expandOpponent(node, explorer);
     }
 
@@ -386,6 +504,7 @@ export async function searchBestLine(
             score: line?.score,
             status: "chosen",
             forced: true,
+            checked: true,
             value:
                 totalGames(outcome) >= params.minGamesPerMove && node.rates
                     ? statsValue(outcome, node.rates, params.shrinkage, drawWeight)
@@ -440,10 +559,14 @@ export async function searchBestLine(
             break;
         }
         const node = frontier.pop();
-        if (!node || !isLive(node)) continue;
+        // A revived candidate can bring back a position that is still queued.
+        if (!node || node.edges || node.stopped || !isLive(node)) continue;
         prefetchAhead();
+        await checkPath(node);
+        if (!isLive(node)) continue;
         await visit(node);
     }
+    await checkPlayed(root);
     return { root, stats };
 }
 

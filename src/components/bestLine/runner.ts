@@ -322,7 +322,7 @@ export function formatSearchReport(report: SearchReport): string {
     return [
         `Best line search: ${round(report.seconds)} s for ${report.moves} moves`,
         `local engine: ${analyses} analyses in ${round(report.engineSeconds)} s ` +
-            `(fast depth ${report.fastDepth}: ${engine.candidates} candidate lists, ` +
+            `(fast depth ${report.fastDepth}: ${engine.candidates} candidate checks, ` +
             `${engine.evaluation} position evaluations; ` +
             `precise depth ${report.preciseDepth}: ${engine.decision} engine decisions, ` +
             `${engine.verification} checks)`,

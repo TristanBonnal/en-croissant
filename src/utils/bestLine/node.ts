@@ -1,4 +1,4 @@
-import type { Score } from "@/bindings";
+import type { BestMoves, Score } from "@/bindings";
 import type { Outcome, Rates } from "./stats";
 import { totalGames } from "./stats";
 import { bestValue, lowerBound, mixValue, upperBound, type Value } from "./value";
@@ -36,6 +36,11 @@ export type Edge = {
     /** Engine line of the move, when it was analysed, and the depth it came from. */
     score?: Score;
     depth?: number;
+    /**
+     * Whether the engine has compared the move with its best one. Candidates
+     * are taken from the explorer and only checked once the search needs them.
+     */
+    checked?: boolean;
     status: EdgeStatus;
     /** Value of its child once expanded, else the value of the move itself. */
     value: Value;
@@ -66,6 +71,8 @@ export type SearchNode = {
     weightSamples?: number;
     value: Value;
     stopped?: StopReason;
+    /** The engine's best line at the fast depth, which the candidates are checked against. */
+    engineBest?: BestMoves | null;
 };
 
 export type BackupOptions = {
@@ -95,7 +102,8 @@ export function liveEdges(node: SearchNode): Edge[] {
 /** Whether every move leading to this node is still being searched. */
 export function isLive(node: SearchNode): boolean {
     for (let current = node; current.parent; current = current.parent.node) {
-        if (current.parent.edge.status === "pruned") return false;
+        const { status } = current.parent.edge;
+        if (status === "pruned" || status === "outOfTolerance") return false;
     }
     return true;
 }

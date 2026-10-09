@@ -39,7 +39,7 @@ test("reportRows sums the analyses of each depth", () => {
             value: "BestLine.Report.Minutes(minutes=2,seconds=05)",
         },
         { label: "BestLine.Report.Cloud", value: "31" },
-        // The candidate lists and the position evaluations run at the fast depth.
+        // The candidate checks and the position evaluations run at the fast depth.
         { label: "BestLine.Report.Fast(depth=14)", value: "15" },
         // The engine decisions and the checks run at the precise depth.
         { label: "BestLine.Report.Precise(depth=18)", value: "6" },

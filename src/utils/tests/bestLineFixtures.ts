@@ -1,6 +1,6 @@
 import { INITIAL_FEN } from "chessops/fen";
 import type { BestMoves } from "@/bindings";
-import { legalSans } from "@/utils/bestLine/position";
+import { legalSans, uciOf } from "@/utils/bestLine/position";
 import type { SearchParams } from "@/utils/bestLine/search";
 
 /**
@@ -24,7 +24,7 @@ export function fakeBook({
         const total = thin[fen] ?? games;
         const moves = legalSans(fen, shares.length).map((san, i) => ({
             san,
-            uci: san,
+            uci: uciOf(fen, san) ?? san,
             ...split(Math.round(total * shares[i])),
         }));
         return { ...split(total), moves };
@@ -35,9 +35,10 @@ export function fakeBook({
 type Request = { purpose: string; multipv?: number; searchMoves?: string[] };
 
 /**
- * Engine lines for the first legal moves, the first one being the best. A
- * precise request answers with `precise` instead, and a request restricted to
- * some moves answers for those moves only, as a real engine does.
+ * Engine lines for the first legal moves, the first one being the best: the
+ * i-th legal move is worth `cps[i]` (-50 beyond). A precise request answers
+ * with `precise` instead, and a request restricted to some moves (UCI) answers
+ * for those moves only, as a real engine does.
  */
 export function fakeEngine(
     cps: number[] = [30, 20, 10, 0, -10],
@@ -52,20 +53,28 @@ export function fakeEngine(
         analysed.push({ fen, ...request });
         const deep = request.purpose === "decision" || request.purpose === "verification";
         const values = cpsOf?.(fen) ?? (deep && precise ? precise : cps);
-        const sans = request.searchMoves?.length
-            ? request.searchMoves
-            : legalSans(fen, request.multipv ?? cps.length);
-        return sans.map(
-            (san, i): BestMoves => ({
-                depth: deep ? 18 : depth,
-                multipv: i + 1,
-                nodes: 0,
-                nps: 0,
-                score: { value: { type: "cp", value: values[i] ?? -50 }, wdl: null },
-                sanMoves: [san],
-                uciMoves: [san],
-            }),
-        );
+        const legal = legalSans(fen, 1000).map((san, rank) => ({
+            san,
+            uci: uciOf(fen, san) ?? san,
+            cp: values[rank] ?? -50,
+        }));
+        const restricted = request.searchMoves?.length
+            ? legal.filter((move) => request.searchMoves?.includes(move.uci))
+            : legal;
+        return restricted
+            .sort((a, b) => b.cp - a.cp)
+            .slice(0, request.multipv ?? cps.length)
+            .map(
+                (move, i): BestMoves => ({
+                    depth: deep ? 18 : depth,
+                    multipv: i + 1,
+                    nodes: 0,
+                    nps: 0,
+                    score: { value: { type: "cp", value: move.cp }, wdl: null },
+                    sanMoves: [move.san],
+                    uciMoves: [move.uci],
+                }),
+            );
     };
     return { analyze, analysed };
 }

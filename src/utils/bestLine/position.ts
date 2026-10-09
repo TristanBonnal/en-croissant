@@ -1,6 +1,7 @@
-import { Chess } from "chessops/chess";
+import { Chess, castlingSide } from "chessops/chess";
 import { makeFen, parseFen } from "chessops/fen";
 import { makeSanAndPlay, parseSan } from "chessops/san";
+import { makeUci, squareRank } from "chessops/util";
 
 /** Chess helpers the search needs, kept in one place so the rules live in chessops only. */
 
@@ -43,6 +44,20 @@ export function playSan(fen: string, san: string): { fen: string; position: Ches
     if (!move) return null;
     position.play(move);
     return { fen: makeFen(position.toSetup()), position };
+}
+
+/**
+ * `san` in the UCI notation an engine expects, castling included (king to its
+ * destination, not onto the rook as chessops and the explorer write it).
+ */
+export function uciOf(fen: string, san: string): string | undefined {
+    const position = positionOf(fen);
+    const move = position && parseSan(position, san);
+    if (!position || !move || !("from" in move)) return undefined;
+    const side = castlingSide(position, move);
+    if (!side) return makeUci(move);
+    const to = squareRank(move.from) * 8 + (side === "h" ? 6 : 2);
+    return makeUci({ from: move.from, to });
 }
 
 /** Moves are matched by SAN, ignoring the check and comment marks engines add. */
