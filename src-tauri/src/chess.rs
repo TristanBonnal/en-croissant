@@ -5,7 +5,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use derivative::Derivative;
@@ -558,13 +558,14 @@ pub async fn analyze_game(
 
         proc.go(&go_mode).await?;
 
-        let best = match search_until_bestmove(&mut proc, &mut reader, moves, &cancel_flag).await {
-            Err(Error::AnalysisCancelled) => {
-                state.analysis_cancel_flags.remove(&id);
-                return Err(Error::AnalysisCancelled);
-            }
-            result => result?,
-        };
+        let best =
+            match search_until_bestmove(&mut proc, &mut reader, moves, &cancel_flag, None).await {
+                Err(Error::AnalysisCancelled) => {
+                    state.analysis_cancel_flags.remove(&id);
+                    return Err(Error::AnalysisCancelled);
+                }
+                result => result?,
+            };
         let current_analysis = MoveAnalysis {
             best,
             ..Default::default()
@@ -618,21 +619,70 @@ fn set_multipv(options: &mut Vec<EngineOption>, multipv: u16) {
     }
 }
 
+/// Longest an `analyze_position` search may run: a deep search of a complex
+/// position can take minutes, which freezes whatever waits for it. Past this the
+/// engine is stopped and its deepest complete lines are kept.
+const ANALYSIS_TIME_CAP: Duration = Duration::from_secs(45);
+
+/// How long an engine asked to stop gets to answer with its `bestmove`.
+const STOP_GRACE: Duration = Duration::from_secs(5);
+
+/// How often a search waiting on its engine looks at the cancel flag and the
+/// time cap: engines only speak once per depth, which at a high depth is
+/// seconds apart.
+const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Waits for the `bestmove` that ends a search the engine was told to stop. An
+/// engine that stays silent or closes its output is not worth keeping.
+async fn wait_for_stopped(reader: &mut EngineReader) -> Result<(), Error> {
+    let drain = async {
+        while let Ok(Some(line)) = reader.next_line().await {
+            if matches!(parse_one(&line), UciMessage::BestMove { .. }) {
+                return true;
+            }
+        }
+        false
+    };
+    match tokio::time::timeout(STOP_GRACE, drain).await {
+        Ok(true) => Ok(()),
+        _ => Err(Error::EngineDisconnected),
+    }
+}
+
 /// Reads engine output until `bestmove` and returns the last complete set of
-/// MultiPV lines. Kills the engine if `cancel_flag` is raised meanwhile.
+/// MultiPV lines. When `cancel_flag` is raised the engine is told to stop and
+/// the search ends with `AnalysisCancelled`, the process staying usable; when
+/// `time_cap` is reached the lines found so far are returned.
 async fn search_until_bestmove(
     proc: &mut EngineProcess,
     reader: &mut EngineReader,
     moves: &[String],
     cancel_flag: &AtomicBool,
+    time_cap: Option<Duration>,
 ) -> Result<Vec<BestMoves>, Error> {
     let fen: Fen = proc.options.fen.parse()?;
     let mut best = Vec::new();
-    while let Ok(Some(line)) = reader.next_line().await {
+    let started = Instant::now();
+    let mut stopped = false;
+    loop {
         if cancel_flag.load(Ordering::SeqCst) {
-            proc.kill().await?;
+            // Stopping instead of killing keeps the process and its hash table
+            // for the next analysis; the search ends with its `bestmove`.
+            if !stopped {
+                proc.base.send("stop").await?;
+            }
+            wait_for_stopped(reader).await?;
             return Err(Error::AnalysisCancelled);
         }
+        if !stopped && !best.is_empty() && time_cap.is_some_and(|cap| started.elapsed() >= cap) {
+            proc.base.send("stop").await?;
+            stopped = true;
+        }
+        let line = match tokio::time::timeout(POLL_INTERVAL, reader.next_line()).await {
+            Err(_) => continue,
+            Ok(Ok(Some(line))) => line,
+            Ok(_) => break,
+        };
         match parse_one(&line) {
             UciMessage::Info(attrs) => {
                 if let Ok(best_moves) = parse_uci_attrs(attrs, &fen, moves) {
@@ -721,12 +771,13 @@ pub async fn analyze_position(
         })
         .await?;
         proc.go_search(&go_mode, &search_moves).await?;
-        search_until_bestmove(proc, reader, &moves, &cancel_flag).await
+        search_until_bestmove(proc, reader, &moves, &cancel_flag, Some(ANALYSIS_TIME_CAP)).await
     }
     .await;
 
     state.analysis_cancel_flags.remove(&id);
-    if result.is_err() {
+    // A cancelled search leaves the engine ready; any other error may not.
+    if matches!(&result, Err(e) if !matches!(e, Error::AnalysisCancelled)) {
         state.analysis_sessions.remove(&id);
     }
     result
@@ -902,6 +953,196 @@ mod tests {
     fn eval_opera_game2() {
         let position = pos("4kb1r/p2rqppp/5n2/1B2p1B1/4P3/1Q6/PPP2PPP/2KR4 b k - 1 14");
         assert_eq!(naive_eval(&position), 20);
+    }
+}
+
+/// `search_until_bestmove` against shell scripts that speak just enough UCI.
+#[cfg(all(test, unix))]
+mod search_tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    const START: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+    const INFO: &str =
+        "info depth 1 seldepth 1 multipv 1 score cp 10 nodes 1 nps 1000 time 1 pv e2e4";
+
+    /// A UCI engine written in sh: `on_go` and `on_stop` are what it does on those commands.
+    async fn engine(dir: &TempDir, on_go: &str, on_stop: &str) -> (EngineProcess, EngineReader) {
+        let path = dir.path().join("fake-engine.sh");
+        let script = format!(
+            "#!/bin/sh\npid=\"\"\nwhile read line; do\n  case \"$line\" in\n    uci) echo uciok;;\n    isready) echo readyok;;\n    go*) {on_go};;\n    stop) {on_stop};;\n    quit) exit 0;;\n  esac\ndone\n"
+        );
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // A script just written can still be busy for a moment when tests run in parallel.
+        for attempt in 0.. {
+            match EngineProcess::new(path.clone()).await {
+                Ok(engine) => return engine,
+                Err(_) if attempt < 20 => tokio::time::sleep(Duration::from_millis(25)).await,
+                Err(e) => panic!("cannot start the fake engine: {e}"),
+            }
+        }
+        unreachable!()
+    }
+
+    /// Starts a one-line search of the initial position.
+    async fn started(proc: &mut EngineProcess) {
+        proc.set_options(EngineOptions {
+            fen: START.to_string(),
+            moves: vec![],
+            extra_options: vec![EngineOption {
+                name: "MultiPV".to_string(),
+                value: "1".to_string(),
+            }],
+        })
+        .await
+        .unwrap();
+        proc.go_search(&GoMode::Depth(1), &[]).await.unwrap();
+    }
+
+    /// Prints a line, then stays silent for a long while unless told to stop.
+    fn silent_after_info() -> (String, &'static str) {
+        (
+            format!("echo \"{INFO}\"; (sleep 5; echo \"bestmove e2e4\") & pid=$!"),
+            "[ -n \"$pid\" ] && kill $pid 2>/dev/null; echo \"bestmove e2e4\"",
+        )
+    }
+
+    #[tokio::test]
+    async fn a_finished_search_returns_its_last_lines() {
+        let dir = TempDir::new().unwrap();
+        let (mut proc, mut reader) = engine(
+            &dir,
+            &format!("echo \"{INFO}\"; echo \"bestmove e2e4\""),
+            ":",
+        )
+        .await;
+        started(&mut proc).await;
+
+        let flag = AtomicBool::new(false);
+        let best = search_until_bestmove(&mut proc, &mut reader, &[], &flag, None)
+            .await
+            .unwrap();
+
+        assert_eq!(best.len(), 1);
+        assert_eq!(best[0].san_moves, vec!["e4"]);
+        assert_eq!(best[0].depth, 1);
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_search_that_just_finished_does_not_hang() {
+        // The engine answers at once and the user cancels at the same time: the
+        // `bestmove` must not be waited for a second time.
+        let dir = TempDir::new().unwrap();
+        let (mut proc, mut reader) = engine(&dir, "echo \"bestmove e2e4\"", ":").await;
+        started(&mut proc).await;
+
+        let flag = AtomicBool::new(true);
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            search_until_bestmove(&mut proc, &mut reader, &[], &flag, None),
+        )
+        .await
+        .expect("the search never returned");
+
+        assert!(matches!(result, Ok(_) | Err(Error::AnalysisCancelled)));
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_search_stops_at_once_even_while_the_engine_is_silent() {
+        let dir = TempDir::new().unwrap();
+        let (on_go, on_stop) = silent_after_info();
+        let (mut proc, mut reader) = engine(&dir, &on_go, on_stop).await;
+        started(&mut proc).await;
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let raise = flag.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            raise.store(true, Ordering::SeqCst);
+        });
+        let began = Instant::now();
+        let result = search_until_bestmove(&mut proc, &mut reader, &[], &flag, None).await;
+
+        assert!(matches!(result, Err(Error::AnalysisCancelled)));
+        assert!(
+            began.elapsed() < Duration::from_millis(2500),
+            "took {:?}",
+            began.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_search_leaves_the_engine_ready_for_the_next_one() {
+        let dir = TempDir::new().unwrap();
+        let (on_go, on_stop) = silent_after_info();
+        let (mut proc, mut reader) = engine(&dir, &on_go, on_stop).await;
+        started(&mut proc).await;
+        let flag = AtomicBool::new(true);
+        let cancelled = search_until_bestmove(&mut proc, &mut reader, &[], &flag, None).await;
+        assert!(matches!(cancelled, Err(Error::AnalysisCancelled)));
+
+        // The `bestmove` of the cancelled search was consumed: this one gets its own.
+        started(&mut proc).await;
+        let flag = AtomicBool::new(false);
+        let best = search_until_bestmove(
+            &mut proc,
+            &mut reader,
+            &[],
+            &flag,
+            Some(Duration::from_millis(200)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(best.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_time_cap_stops_a_search_whose_engine_is_silent() {
+        let dir = TempDir::new().unwrap();
+        let (on_go, on_stop) = silent_after_info();
+        let (mut proc, mut reader) = engine(&dir, &on_go, on_stop).await;
+        started(&mut proc).await;
+
+        let flag = AtomicBool::new(false);
+        let began = Instant::now();
+        let best = search_until_bestmove(
+            &mut proc,
+            &mut reader,
+            &[],
+            &flag,
+            Some(Duration::from_millis(300)),
+        )
+        .await
+        .unwrap();
+
+        // It keeps the lines it had, and does not wait for the engine to speak again.
+        assert_eq!(best.len(), 1);
+        assert!(
+            began.elapsed() < Duration::from_millis(2500),
+            "took {:?}",
+            began.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_engine_that_ignores_stop_does_not_hang_a_cancelled_search() {
+        let dir = TempDir::new().unwrap();
+        let (mut proc, mut reader) = engine(&dir, &format!("echo \"{INFO}\""), ":").await;
+        started(&mut proc).await;
+
+        let flag = AtomicBool::new(true);
+        let result = tokio::time::timeout(
+            STOP_GRACE + Duration::from_secs(3),
+            search_until_bestmove(&mut proc, &mut reader, &[], &flag, None),
+        )
+        .await
+        .expect("the search never returned");
+
+        assert!(matches!(result, Err(Error::EngineDisconnected)));
     }
 }
 
