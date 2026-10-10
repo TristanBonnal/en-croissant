@@ -83,6 +83,173 @@ test("searchBestLine leaves the book when a position has too few games", async (
     expect(thin?.edges?.length).toBe(1);
 });
 
+// --- out of book --------------------------------------------------------------
+
+/**
+ * A book where some positions have their own results (wins and draws as shares
+ * of `games`, white's point of view) instead of the usual ones: what the
+ * explorer says of a position nobody played much, whose moves are not looked at.
+ */
+function bookWith(
+    results: Record<string, { wins: number; draws: number; games: number }>,
+    base = fakeBook(),
+) {
+    const explore = async (fen: string) => {
+        const position = await base.explore(fen);
+        const own = results[fen];
+        if (!own) return position;
+        const white = Math.round(own.games * own.wins);
+        const draws = Math.round(own.games * own.draws);
+        return { ...position, white, draws, black: own.games - white - draws };
+    };
+    return { explore, explored: base.explored };
+}
+
+test("searchBestLine values a position it leaves the book at by its own games", async () => {
+    // 2 000 games: too few to follow the explorer, plenty to say how the position goes.
+    const [first] = legalSans(INITIAL_FEN, 1);
+    const afterFirst = playSan(INITIAL_FEN, first)!.fen;
+    const book = bookWith({ [afterFirst]: { wins: 0.6, draws: 0.2, games: 2000 } });
+    const engine = fakeEngine([-80, -90]);
+    const { root } = await searchBestLine(params({ maxPlies: 2 }), {
+        explore: book.explore,
+        analyze: engine.analyze,
+    });
+
+    const thin = root.edges?.find((e) => e.child?.fen === afterFirst)?.child;
+    expect(thin?.stopped).toBe("outOfBook");
+    // 0.6 + 0.2 / 2, whatever the engine thinks of the position.
+    expect(thin?.value.source).toBe("stats");
+    expect(thin?.value.mean).toBeGreaterThan(0.68);
+});
+
+test("searchBestLine prefers the better results to the better evaluation out of book", async () => {
+    // Both replies lead to positions the explorer knows little about. The engine
+    // likes the first better, but the games say the second scores more.
+    const [one, two] = legalSans(INITIAL_FEN, 2);
+    const afterOne = playSan(INITIAL_FEN, one)!.fen;
+    const afterTwo = playSan(INITIAL_FEN, two)!.fen;
+    const book = bookWith({
+        [afterOne]: { wins: 0.35, draws: 0.2, games: 2000 },
+        [afterTwo]: { wins: 0.55, draws: 0.2, games: 2000 },
+    });
+    const engine = fakeEngine([30, 25], {
+        cpsOf: (fen) => (fen === afterOne ? [300] : fen === afterTwo ? [-300] : undefined),
+    });
+    const { root } = await searchBestLine(params({ maxPlies: 3, minGamesPerMove: 100 }), {
+        explore: book.explore,
+        analyze: engine.analyze,
+    });
+
+    expect(root.edges?.find((e) => e.status === "chosen")?.san).toBe(two);
+});
+
+test("searchBestLine leaves the engine's line below such a position to the end of the search", async () => {
+    const [first] = legalSans(INITIAL_FEN, 1);
+    const afterFirst = playSan(INITIAL_FEN, first)!.fen;
+    const book = bookWith({ [afterFirst]: { wins: 0.5, draws: 0.2, games: 2000 } });
+    const engine = fakeEngine();
+    const { root } = await searchBestLine(params({ maxPlies: 6 }), {
+        explore: book.explore,
+        analyze: engine.analyze,
+    });
+
+    // The line still goes its whole length, with the engine's moves.
+    expect(mainBranch(root)).toHaveLength(6);
+    const thin = root.edges?.find((e) => e.child?.fen === afterFirst)?.child;
+    expect(thin?.edges?.[0].decidedBy).toBe("outOfBook");
+    // Nothing below the position was looked up: the games would not have changed a thing.
+    const below = mainBranch(root)
+        .slice(2)
+        .map((edge) => edge.child?.fen);
+    for (const fen of below) expect(book.explored).not.toContain(fen);
+    // And the opponent's moves there are quick ones.
+    const opponentAnalyses = engine.analysed.filter(
+        (a) => a.fen !== INITIAL_FEN && a.fen.split(" ")[1] === "b",
+    );
+    for (const a of opponentAnalyses) expect(a.purpose).toBe("evaluation");
+});
+
+test("searchBestLine does not play the engine on below a position that is not kept", async () => {
+    // Line mode keeps the most played reply only: the other one is left as it is.
+    const [first] = legalSans(INITIAL_FEN, 1);
+    const afterFirst = playSan(INITIAL_FEN, first)!.fen;
+    const [likely, other] = legalSans(afterFirst, 2);
+    const thinOther = playSan(afterFirst, other)!.fen;
+    const thinLikely = playSan(afterFirst, likely)!.fen;
+    const book = bookWith({
+        [thinLikely]: { wins: 0.5, draws: 0.2, games: 2000 },
+        [thinOther]: { wins: 0.5, draws: 0.2, games: 2000 },
+    });
+    const engine = fakeEngine();
+    const run = (mode: "line" | "tree") =>
+        searchBestLine(params({ maxPlies: 6, mode }), {
+            explore: book.explore,
+            analyze: engine.analyze,
+        });
+
+    const line = await run("line");
+    const lineEdges = (fen: string) =>
+        line.root.edges?.[0]?.child?.edges?.find((e) => e.child?.fen === fen)?.child?.edges;
+    expect(lineEdges(thinLikely)).toBeDefined();
+    expect(lineEdges(thinOther)).toBeUndefined();
+
+    const tree = await run("tree");
+    const treeEdges = (fen: string) =>
+        tree.root.edges?.[0]?.child?.edges?.find((e) => e.child?.fen === fen)?.child?.edges;
+    expect(treeEdges(thinOther)).toBeDefined();
+});
+
+test("searchBestLine only plays the engine on as far as the result is kept", async () => {
+    // The result is the first move only (the live analysis): the line below is of no use.
+    const [first] = legalSans(INITIAL_FEN, 1);
+    const afterFirst = playSan(INITIAL_FEN, first)!.fen;
+    const book = bookWith({ [afterFirst]: { wins: 0.5, draws: 0.2, games: 2000 } });
+    const engine = fakeEngine();
+    const { root } = await searchBestLine(params({ maxPlies: 6, keepPlies: 1 }), {
+        explore: book.explore,
+        analyze: engine.analyze,
+    });
+
+    const thin = root.edges?.find((e) => e.child?.fen === afterFirst)?.child;
+    expect(thin?.edges).toBeUndefined();
+    expect(engine.analysed.filter((a) => a.fen === afterFirst)).toHaveLength(0);
+});
+
+test("searchBestLine plays the engine's first move out of book even when only one move is kept", async () => {
+    // The position searched is itself out of book: the move to play is the engine's.
+    const book = fakeBook({ games: 2000 });
+    const engine = fakeEngine();
+    const { root } = await searchBestLine(params({ maxPlies: 3, keepPlies: 1 }), {
+        explore: book.explore,
+        analyze: engine.analyze,
+    });
+
+    expect(root.edges).toHaveLength(1);
+    expect(root.edges?.[0].decidedBy).toBe("outOfBook");
+    expect(root.edges?.[0].child?.edges).toBeUndefined();
+});
+
+test("searchBestLine does not play the engine on once the search is cancelled", async () => {
+    const [first] = legalSans(INITIAL_FEN, 1);
+    const afterFirst = playSan(INITIAL_FEN, first)!.fen;
+    const book = bookWith({ [afterFirst]: { wins: 0.5, draws: 0.2, games: 2000 } });
+    const engine = fakeEngine();
+    let cancelled = false;
+    const { root, stats } = await searchBestLine(params({ maxPlies: 6 }), {
+        explore: book.explore,
+        analyze: engine.analyze,
+        onProgress: () => {
+            cancelled = true;
+        },
+        isCancelled: () => cancelled,
+    });
+
+    expect(stats.cancelled).toBe(true);
+    const thin = root.edges?.find((e) => e.child?.fen === afterFirst)?.child;
+    expect(thin?.edges).toBeUndefined();
+});
+
 test("searchBestLine never opens a position it would reach too rarely", async () => {
     const book = fakeBook({ shares: [0.6, 0.3, 0.05] });
     const engine = fakeEngine();
@@ -132,6 +299,39 @@ test("searchBestLine returns the tree it has when the search is cancelled", asyn
     expect(stats.expanded).toBeGreaterThan(0);
     expect(mainBranch(root).length).toBeGreaterThan(0);
     expect(stats.cancelled).toBe(true);
+});
+
+test("searchBestLine returns what it has when an analysis fails because the search was stopped", async () => {
+    const book = fakeBook();
+    const engine = fakeEngine();
+    let stopped = false;
+    const { root, stats } = await searchBestLine(params({ maxPlies: 6 }), {
+        explore: book.explore,
+        analyze: async (fen, request) => {
+            // The engine gives up the analysis it was running when the user stops.
+            if (fen !== INITIAL_FEN) {
+                stopped = true;
+                throw new Error("Analysis cancelled");
+            }
+            return engine.analyze(fen, request);
+        },
+        isCancelled: () => stopped,
+    });
+
+    expect(stats.cancelled).toBe(true);
+    expect(root.edges?.length).toBeGreaterThan(0);
+});
+
+test("searchBestLine does not hide a failure the user did not ask for", async () => {
+    const book = fakeBook();
+    await expect(
+        searchBestLine(params({ maxPlies: 2 }), {
+            explore: book.explore,
+            analyze: async () => {
+                throw new Error("engine crashed");
+            },
+        }),
+    ).rejects.toThrow("engine crashed");
 });
 
 test("searchBestLine plays a forced first move", async () => {
@@ -199,8 +399,11 @@ test("searchBestLine finds the same tree when it fetches positions ahead", async
 
 // --- candidates --------------------------------------------------------------
 
-test("searchBestLine takes its candidates from the explorer, beyond the engine's first lines", async () => {
-    // The most played move is the engine's sixth, still within tolerance.
+// Only the first move is sound; the others lose at least a pawn.
+const losing = [30, -70, ...Array(18).fill(-80)];
+
+test("searchBestLine checks the played moves the engine ranks beyond its fifth line", async () => {
+    // The most played move is the engine's sixth, and still within tolerance.
     const book = fakeBook({ shares: [0.05, 0.05, 0.05, 0.05, 0.05, 0.7] });
     const engine = fakeEngine([30, 25, 20, 15, 10, 5]);
     const { root } = await searchBestLine(params({ maxPlies: 1 }), {
@@ -209,61 +412,109 @@ test("searchBestLine takes its candidates from the explorer, beyond the engine's
     });
 
     const sixth = legalSans(INITIAL_FEN, 6)[5];
-    expect(root.edges?.find((e) => e.status === "chosen")?.san).toBe(sixth);
+    expect(root.edges?.find((e) => e.san === sixth)?.status).toBe("chosen");
+    // One analysis for the first five lines, one restricted to the move left out.
+    expect(engine.analysed).toEqual([
+        { fen: INITIAL_FEN, purpose: "candidates", multipv: 5 },
+        {
+            fen: INITIAL_FEN,
+            purpose: "candidates",
+            multipv: 1,
+            searchMoves: [uciOf(INITIAL_FEN, sixth)],
+        },
+    ]);
 });
 
-test("searchBestLine only checks the move it plays, with the engine's best line alone when it is the same", async () => {
-    // The most played move is the engine's best: one line is all it takes.
-    const book = fakeBook({ shares: [0.6, 0.3] });
-    const engine = fakeEngine([30, 20]);
+test("searchBestLine judges a move beyond the fifth line against the engine's best", async () => {
+    // The sixth move is the most played, but loses a pawn.
+    const book = fakeBook({ shares: [0.05, 0.05, 0.05, 0.05, 0.05, 0.7] });
+    const engine = fakeEngine([30, 29, 28, 27, 26, -80]);
     const { root } = await searchBestLine(params({ maxPlies: 1 }), {
         explore: book.explore,
         analyze: engine.analyze,
     });
 
-    expect(engine.analysed).toEqual([{ fen: INITIAL_FEN, purpose: "candidates", multipv: 1 }]);
-    // The other candidate was never checked.
-    expect(root.edges?.filter((e) => e.checked)).toHaveLength(1);
+    const sixth = legalSans(INITIAL_FEN, 6)[5];
+    expect(root.edges?.find((e) => e.san === sixth)?.status).toBe("outOfTolerance");
+    expect(root.edges?.find((e) => e.status === "chosen")?.san).not.toBe(sixth);
 });
 
-test("searchBestLine checks the move it plays on its own when the engine plays another", async () => {
-    const book = fakeBook({ shares: [0.3, 0.6] });
+test("searchBestLine asks for no more lines when the fifth is already out of tolerance", async () => {
+    const book = fakeBook({ shares: [0.05, 0.05, 0.05, 0.05, 0.05, 0.7] });
+    const engine = fakeEngine([30, 29, 28, 27, -80, -90]);
+    await searchBestLine(params({ maxPlies: 1 }), {
+        explore: book.explore,
+        analyze: engine.analyze,
+    });
+
+    expect(engine.analysed).toHaveLength(1);
+});
+
+test("searchBestLine only checks the moves played often enough to be ranked", async () => {
+    // The sixth move was played 20 times: it could not be ranked whatever the engine thinks.
+    const book = fakeBook({ games: 100_000, shares: [0.2, 0.2, 0.2, 0.2, 0.19998, 0.0002] });
+    const engine = fakeEngine([30, 29, 28, 27, 26, 25]);
+    await searchBestLine(params({ maxPlies: 1 }), {
+        explore: book.explore,
+        analyze: engine.analyze,
+    });
+
+    expect(engine.analysed).toHaveLength(1);
+});
+
+test("searchBestLine checks at most the five most played moves left out", async () => {
+    const shares = [0.02, 0.02, 0.02, 0.02, 0.02, 0.03, 0.06, 0.15, 0.2, 0.19, 0.09, 0.08];
+    const book = fakeBook({ shares });
+    const engine = fakeEngine([30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19]);
+    await searchBestLine(params({ maxPlies: 1 }), {
+        explore: book.explore,
+        analyze: engine.analyze,
+    });
+
+    const [, extra] = engine.analysed;
+    const sans = legalSans(INITIAL_FEN, 12);
+    const mostPlayedLeftOut = [8, 9, 7, 10, 11].map((i) => uciOf(INITIAL_FEN, sans[i]));
+    expect(engine.analysed).toHaveLength(2);
+    expect(extra.multipv).toBe(5);
+    expect([...(extra.searchMoves ?? [])].sort()).toEqual([...mostPlayedLeftOut].sort());
+});
+
+test("searchBestLine analyses a studied position once, for its five first lines at the precise depth", async () => {
+    const book = fakeBook({ shares: [0.6, 0.3] });
     const engine = fakeEngine([30, 20]);
     await searchBestLine(params({ maxPlies: 1 }), {
         explore: book.explore,
         analyze: engine.analyze,
     });
 
-    const played = legalSans(INITIAL_FEN, 2)[1];
-    expect(engine.analysed).toEqual([
-        { fen: INITIAL_FEN, purpose: "candidates", multipv: 1 },
-        {
-            fen: INITIAL_FEN,
-            purpose: "candidates",
-            multipv: 1,
-            searchMoves: [uciOf(INITIAL_FEN, played)],
-        },
-    ]);
+    expect(engine.analysed).toEqual([{ fen: INITIAL_FEN, purpose: "candidates", multipv: 5 }]);
 });
 
-test("searchBestLine checks the next candidate when the one it plays is rejected", async () => {
-    const book = fakeBook({ shares: [0.3, 0.6] });
-    const engine = fakeEngine([30, -70]);
-    const { root } = await searchBestLine(params({ maxPlies: 1 }), {
-        explore: book.explore,
+test("searchBestLine plays the opponent's engine moves at the fast depth only", async () => {
+    // Out of book everywhere below the first move: the engine plays both sides.
+    const book = fakeBook({ games: 100_000 });
+    const thinBook = {
+        explored: book.explored,
+        explore: async (fen: string) =>
+            fen === INITIAL_FEN ? book.explore(fen) : { white: 0, draws: 0, black: 0, moves: [] },
+    };
+    const engine = fakeEngine();
+    await searchBestLine(params({ maxPlies: 4 }), {
+        explore: thinBook.explore,
         analyze: engine.analyze,
     });
 
-    const [best, bad] = legalSans(INITIAL_FEN, 2);
-    expect(root.edges?.find((e) => e.san === bad)?.status).toBe("outOfTolerance");
-    expect(root.edges?.find((e) => e.status === "chosen")?.san).toBe(best);
-    expect(root.edges?.find((e) => e.san === best)?.checked).toBe(true);
+    const opponent = engine.analysed.filter(
+        (a) => a.fen !== INITIAL_FEN && a.fen.split(" ")[1] === "b",
+    );
+    expect(opponent.length).toBeGreaterThan(0);
+    for (const a of opponent) expect(a.purpose).toBe("evaluation");
 });
 
 test("searchBestLine drops a candidate out of tolerance before searching below it", async () => {
     // The most played move loses a pawn.
     const book = fakeBook({ shares: [0.3, 0.6] });
-    const engine = fakeEngine([30, -70]);
+    const engine = fakeEngine(losing);
     const { root } = await searchBestLine(params({ maxPlies: 3 }), {
         explore: book.explore,
         analyze: engine.analyze,
@@ -273,6 +524,19 @@ test("searchBestLine drops a candidate out of tolerance before searching below i
     expect(root.edges?.find((e) => e.san === bad)?.status).toBe("outOfTolerance");
     expect(root.edges?.find((e) => e.status === "chosen")?.san).toBe(best);
     expect(book.explored).not.toContain(playSan(INITIAL_FEN, bad)?.fen);
+});
+
+test("searchBestLine plays the engine's best move when no candidate has enough games", async () => {
+    const book = fakeBook({ shares: [0.0001, 0.0001] });
+    const engine = fakeEngine([30, 20]);
+    const { root } = await searchBestLine(params({ maxPlies: 1 }), {
+        explore: book.explore,
+        analyze: engine.analyze,
+    });
+
+    const chosen = root.edges?.find((e) => e.status === "chosen");
+    expect(chosen?.san).toBe(legalSans(INITIAL_FEN, 1)[0]);
+    expect(chosen?.decidedBy).toBe("engineChoice");
 });
 
 test("searchBestLine never analyses a position it does not search below", async () => {
@@ -293,10 +557,10 @@ test("searchBestLine never analyses a position it does not search below", async 
     for (const { fen } of engine.analysed) expect(searchedBelow.has(fen)).toBe(true);
 });
 
-test("searchBestLine checks candidates at the precise depth and searches on below the replacement", async () => {
+test("searchBestLine searches on below the candidate that replaces a rejected one", async () => {
     // The most played move is rejected by the engine: the line goes on below the other.
     const book = fakeBook({ shares: [0.3, 0.6] });
-    const engine = fakeEngine([30, 25], { precise: [30, -70] });
+    const engine = fakeEngine([30, 25], { precise: losing });
     const { root } = await searchBestLine(params({ maxPlies: 4 }), {
         explore: book.explore,
         analyze: engine.analyze,
@@ -442,4 +706,19 @@ test("searchBestLine plays the line to its full length even where the replies ar
     });
 
     expect(mainBranch(root)).toHaveLength(8);
+});
+
+test("searchBestLine starts from the reach of the position it continues", async () => {
+    const book = fakeBook({ shares: [0.6, 0.3] });
+    const search = (reach?: number) =>
+        searchBestLine(params({ maxPlies: 4, minReach: 0.2, reach }), {
+            explore: book.explore,
+            analyze: fakeEngine().analyze,
+        });
+
+    const whole = await search();
+    const rare = await search(0.1);
+
+    expect(rare.root.reach).toBe(0.1);
+    expect(rare.stats.expanded).toBeLessThan(whole.stats.expanded);
 });

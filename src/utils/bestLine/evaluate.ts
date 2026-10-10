@@ -30,7 +30,14 @@ export async function evaluateLeaves(
     let evaluated = 0;
     for (const leaf of leaves) {
         if (deps.isCancelled?.()) break;
-        const [best] = await deps.analyze(leaf.fen, { purpose: "evaluation", multipv: 1 });
+        let best: Awaited<ReturnType<typeof deps.analyze>>[number] | undefined;
+        try {
+            [best] = await deps.analyze(leaf.fen, { purpose: "evaluation", multipv: 1 });
+        } catch (e) {
+            // An analysis the engine gave up because the search was stopped.
+            if (deps.isCancelled?.()) break;
+            throw e;
+        }
         if (!best) continue;
         leaf.evaluation = best.score;
         evaluated++;

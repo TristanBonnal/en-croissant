@@ -143,6 +143,8 @@ export type BestLineNode = MoveChoice & {
     trap?: boolean;
     /** Position before the move. */
     fen: string;
+    /** How likely a game is to reach the position after the move. */
+    reach?: number;
     candidates: Candidate[];
     children: BestLineNode[];
 };

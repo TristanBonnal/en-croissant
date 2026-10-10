@@ -6,10 +6,12 @@ import {
     bestLineRunFamily,
     idleBestLineRun,
 } from "@/state/atoms";
+import { commands } from "@/bindings";
 import { createTreeStore } from "@/state/store/tree";
 import { bestLineSettingsSchema } from "@/utils/bestLine";
 import { defaultTree } from "@/utils/treeReducer";
 import {
+    cancelBestLine,
     createAnalyze,
     formatSearchReport,
     newSearchReport,
@@ -205,6 +207,38 @@ test("the search report counts the engine analyses by purpose and depth", async 
     releaseBestLine(REPORT_TAB);
 });
 
+test("stopping a search while the engine works is not an error and keeps what was found", async () => {
+    const tab = "tab-stop";
+    const stopTree = createTreeStore();
+    stopTree.setState(defaultTree());
+    const unregister = registerTreeStore(tab, stopTree);
+    fetchMock.mockImplementation(async () => explorerPosition("e4", "e2e4"));
+    // The engine takes its time, and answers with an error once it is told to stop.
+    const pending: ((answer: unknown) => void)[] = [];
+    analyzePosition.mockImplementation(() => new Promise((resolve) => pending.push(resolve)));
+    vi.mocked(commands.cancelAnalysis).mockImplementation(async () => {
+        for (const resolve of pending.splice(0)) {
+            resolve({ status: "error", error: "Analysis cancelled" });
+        }
+        return { status: "ok", data: null };
+    });
+    const config: SearchConfig = {
+        settings: { ...bestLineSettingsSchema.parse({}), useCloudEval: false, fullMoves: 2 },
+        engine: { type: "local", id: "e", name: "e", path: "/e", settings: [] } as never,
+        explorerOptions: { color: "white" },
+    };
+
+    void startBestLine(tab, config, []);
+    await vi.waitFor(() => expect(pending.length).toBeGreaterThan(0));
+    cancelBestLine(tab);
+    await vi.waitFor(() => expect(atoms.get(bestLineRunFamily(tab)).running).toBe(false));
+
+    // Nothing to show an alert about: the user asked for it.
+    expect(atoms.get(bestLineRunFamily(tab)).error).toBeNull();
+    unregister();
+    releaseBestLine(tab);
+});
+
 test("formatSearchReport spells out where the search spent its time", () => {
     expect(
         formatSearchReport({
@@ -281,10 +315,50 @@ test("the engine runs one analysis at a time for a tab", async () => {
     expect(started).toEqual([INITIAL, AFTER_E4]);
 });
 
+test("analyses queued behind a cancelled one never reach the engine", async () => {
+    const config = analyzeConfig();
+    let cancelled = false;
+    const analyze = createAnalyze(
+        "tab-cancel",
+        config,
+        newSearchReport(config.settings),
+        () => cancelled,
+    );
+    const started: string[] = [];
+    let release: (() => void) | null = null;
+    analyzePosition.mockImplementation(
+        async (_id: string, _p: string, _g: unknown, fen: string) => {
+            started.push(fen);
+            await new Promise<void>((resolve) => (release = resolve));
+            return { status: "error", error: "cancelled" };
+        },
+    );
+
+    const first = analyze(INITIAL, { purpose: "candidates" }).catch(() => {});
+    const second = analyze(AFTER_E4, { purpose: "candidates" }).catch(() => {});
+    await vi.waitFor(() => expect(started).toEqual([INITIAL]));
+    cancelled = true;
+    release!();
+    await Promise.all([first, second]);
+
+    expect(started).toEqual([INITIAL]);
+});
+
+test("an analysis that returned no line is not kept in the cache", async () => {
+    const config = analyzeConfig();
+    const analyze = createAnalyze("tab-empty", config, newSearchReport(config.settings));
+    analyzePosition.mockResolvedValue({ status: "ok", data: [] });
+
+    await analyze(INITIAL, { purpose: "candidates" });
+    await analyze(INITIAL, { purpose: "candidates" });
+
+    expect(analyzePosition).toHaveBeenCalledTimes(2);
+});
+
 test("the analysis cache ignores the move number of a position", async () => {
     const config = analyzeConfig();
     const analyze = createAnalyze("tab-cache", config, newSearchReport(config.settings));
-    analyzePosition.mockResolvedValue({ status: "ok", data: [] });
+    analyzePosition.mockResolvedValue({ status: "ok", data: [{ depth: 10 }] });
 
     await analyze(INITIAL, { purpose: "candidates" });
     await analyze("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 9", {

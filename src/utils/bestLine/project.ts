@@ -163,6 +163,7 @@ export function toBestLineNodes(root: SearchNode, options: OutputOptions): BestL
                 uci: edge.uci,
                 color: mover,
                 fen: node.fen,
+                reach: edge.child?.reach,
                 reason: trap ? ("trap" as MoveReason) : reasonOf(edge, node),
                 score: scoreOf(edge),
                 precise: isPrecise(edge, options.preciseDepth),

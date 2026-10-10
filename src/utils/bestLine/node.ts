@@ -1,4 +1,4 @@
-import type { BestMoves, Score } from "@/bindings";
+import type { Score } from "@/bindings";
 import type { Outcome, Rates } from "./stats";
 import { totalGames } from "./stats";
 import { bestValue, lowerBound, mixValue, upperBound, type Value } from "./value";
@@ -36,11 +36,6 @@ export type Edge = {
     /** Engine line of the move, when it was analysed, and the depth it came from. */
     score?: Score;
     depth?: number;
-    /**
-     * Whether the engine has compared the move with its best one. Candidates
-     * are taken from the explorer and only checked once the search needs them.
-     */
-    checked?: boolean;
     status: EdgeStatus;
     /** Value of its child once expanded, else the value of the move itself. */
     value: Value;
@@ -75,8 +70,8 @@ export type SearchNode = {
     /** Evaluation of the position itself, when it was analysed for its own sake. */
     evaluation?: Score;
     stopped?: StopReason;
-    /** The engine's first lines at the fast depth, the best one being what candidates are checked against. */
-    engineLines?: BestMoves[];
+    /** Valued on its own games, which the engine's line below it does not change. */
+    pinned?: boolean;
 };
 
 export type BackupOptions = {
@@ -122,7 +117,7 @@ export function backup(node: SearchNode, options: BackupOptions): { pruned: numb
     let pruned = 0;
     let current: SearchNode = node;
     for (;;) {
-        if (current.edges && current.edges.length > 0) {
+        if (current.edges && current.edges.length > 0 && !current.pinned) {
             if (current.studied) {
                 const decided = decide(current, options);
                 current.value = decided.value;

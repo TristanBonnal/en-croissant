@@ -89,3 +89,40 @@ test("the result marks the studied side's evaluations as coming from the precise
     expect(nodes[0].precise).toBe(true);
     expect(nodes[0].score?.value).toEqual({ type: "cp", value: 40 });
 });
+
+test("evaluateLeaves stops quietly when an analysis fails because the search was stopped", async () => {
+    const engine = fakeEngine([30, 20]);
+    const root = await searched(engine);
+    let stopped = false;
+
+    const evaluated = await evaluateLeaves(
+        root,
+        { mode: "tree" },
+        {
+            analyze: async () => {
+                stopped = true;
+                throw new Error("Analysis cancelled");
+            },
+            isCancelled: () => stopped,
+        },
+    );
+
+    expect(evaluated).toBe(0);
+});
+
+test("evaluateLeaves does not hide a failure the user did not ask for", async () => {
+    const engine = fakeEngine([30, 20]);
+    const root = await searched(engine);
+
+    await expect(
+        evaluateLeaves(
+            root,
+            { mode: "tree" },
+            {
+                analyze: async () => {
+                    throw new Error("engine crashed");
+                },
+            },
+        ),
+    ).rejects.toThrow("engine crashed");
+});

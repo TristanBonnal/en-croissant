@@ -161,6 +161,7 @@ function searchParamsOf(
     fen: string,
     plies: number,
     forcedMove?: string,
+    keepPlies?: number,
 ): SearchParams {
     const { settings } = config;
     return {
@@ -182,6 +183,8 @@ function searchParamsOf(
         risk: DEFAULT_RISK,
         smoothing: DEFAULT_SMOOTHING,
         forcedMove,
+        mode: settings.mode,
+        keepPlies,
     };
 }
 
@@ -276,7 +279,12 @@ export function newSearchReport(settings: BestLineSettings): SearchReport {
  * memoized for the session; the number of lines never exceeds the number of
  * moves the analysis is restricted to, which the engine would never send.
  */
-export function createAnalyze(tab: string, config: SearchConfig, report: SearchReport) {
+export function createAnalyze(
+    tab: string,
+    config: SearchConfig,
+    report: SearchReport,
+    isCancelled: () => boolean = () => false,
+) {
     const { engine, settings } = config;
     const engineOptions = (engine.settings ?? []).map((s) => ({
         ...s,
@@ -291,7 +299,7 @@ export function createAnalyze(tab: string, config: SearchConfig, report: SearchR
         const multipv = searchMoves.length > 0 ? Math.min(asked, searchMoves.length) : asked;
         const key = `${engineKey}|${depth}|${multipv}|${searchMoves.join(",")}|${analysisKey(fen)}`;
         if (engineCache.has(key)) report.cached++;
-        return memoizeAsync(engineCache, key, async () => {
+        const lines = memoizeAsync(engineCache, key, async () => {
             const cloud =
                 settings.useCloudEval && searchMoves.length === 0
                     ? await cloudLines(fen, depth, multipv)
@@ -303,24 +311,38 @@ export function createAnalyze(tab: string, config: SearchConfig, report: SearchR
             report.engine[request.purpose]++;
             const start = Date.now();
             try {
-                return await enqueueAnalysis(tab, async () =>
-                    unwrap(
-                        await commands.analyzePosition(
-                            analysisId(tab),
-                            engine.path,
-                            { t: "Depth", c: depth },
-                            fen,
-                            [],
-                            multipv,
-                            searchMoves,
-                            engineOptions,
-                        ),
-                    ),
-                );
+                return await enqueueAnalysis(tab, async () => {
+                    // The backend only cancels the analysis running, so those
+                    // waiting behind it would each start a full one.
+                    if (isCancelled()) throw new Error("Analysis cancelled");
+                    const answer = await commands.analyzePosition(
+                        analysisId(tab),
+                        engine.path,
+                        { t: "Depth", c: depth },
+                        fen,
+                        [],
+                        multipv,
+                        searchMoves,
+                        engineOptions,
+                    );
+                    // A search the user stopped is not an error to show.
+                    if (answer.status === "error" && isCancelled()) {
+                        throw new Error("Analysis cancelled");
+                    }
+                    return unwrap(answer);
+                });
             } finally {
                 report.engineSeconds += (Date.now() - start) / 1000;
             }
         });
+        // An engine that stopped without a line says nothing about the position.
+        void lines.then(
+            (found) => {
+                if (found.length === 0 && engineCache.get(key) === lines) engineCache.delete(key);
+            },
+            () => {},
+        );
+        return lines;
     };
 }
 
@@ -371,7 +393,7 @@ async function run(
     const isCancelled = () => cancelFlags.get(tab) === true;
 
     const { explorerOptions, token } = config;
-    const analyze = createAnalyze(tab, config, report);
+    const analyze = createAnalyze(tab, config, report, isCancelled);
     const explorerKey = JSON.stringify(explorerOptions);
 
     const sleep = (ms: number) =>
@@ -504,7 +526,8 @@ export async function startLiveSearch(key: string, config: SearchConfig, fen: st
     if (liveRequests.get(key) !== request || !isTurnOf(fen, config.settings.color)) return;
 
     const live: SearchConfig = { ...config, settings: { ...config.settings, mode: "tree" } };
-    await run(key, live, searchParamsOf(live, fen, 2 * config.settings.liveMoves - 1), (nodes) => ({
+    const plies = 2 * config.settings.liveMoves - 1;
+    await run(key, live, searchParamsOf(live, fen, plies, undefined, 1), (nodes) => ({
         fen,
         color: config.settings.color,
         metric: config.settings.metric,
@@ -557,6 +580,7 @@ export function extendLine(tab: string, config: SearchConfig, path: number[], fu
     const params = {
         ...searchParamsOf(config, fenAfter(node), fullMoves * 2),
         color: result.color,
+        reach: node.reach,
     };
     return run(tab, config, params, (nodes) => ({
         ...result,

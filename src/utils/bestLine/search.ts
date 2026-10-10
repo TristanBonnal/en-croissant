@@ -16,10 +16,10 @@ import {
     type Edge,
     type EdgeStatus,
     isLive,
-    liveEdges,
     type SearchNode,
 } from "./node";
 import { legalMoveCount, playSan, positionOf, sanKey, uciOf } from "./position";
+import { keptEdges } from "./project";
 import type { Frontier } from "./frontier";
 import { type Lookahead, nextPositions } from "./optimism";
 import { moveProbabilities } from "./probability";
@@ -50,8 +50,10 @@ import { DEFAULT_DRAW_RATE, engineValue, statsValue, terminalValue, type Value }
 const SIGMA_FLOOR = 0.01;
 /** Last-resort stop, for a search that would otherwise run for hours. */
 const MAX_EXPANDED = 3000;
-/** Safety cap on the moves of the studied side searched as candidates. */
-const MAX_CANDIDATES = 8;
+/** Lines of the engine's first analysis of a studied position: its candidates. */
+const MAX_CANDIDATES = 5;
+/** Moves played often enough that the engine ranks lower, checked in a second analysis. */
+const MAX_EXTRA_CANDIDATES = 5;
 /** Frequent mistakes of the opponent examined per position when branching on traps. */
 const MAX_TRAPS = 3;
 /** Opponent replies listed but not searched, for the result table. */
@@ -60,6 +62,14 @@ const LISTED_REPLIES = 5;
 const FIRST_CHOICE_GAIN = 0.05;
 /** Positions next in line whose explorer data is fetched ahead of their turn. */
 const LOOKAHEAD = 4;
+
+/**
+ * Games from which the results of a position stand against the engine's
+ * evaluation of it, however few the explorer has to follow its moves. A move
+ * needs as many to be ranked on its results; fewer are not worth more than the
+ * engine's word.
+ */
+const TRUST_FLOOR = 50;
 
 /** Games the rates of a position are worth when shrinking the moves played from it. */
 export const DEFAULT_SHRINKAGE = 100;
@@ -91,6 +101,8 @@ export type SearchParams = {
     trapMinShare?: number;
     /** Share of the games a position must be reached in to be opened. */
     minReach: number;
+    /** How likely the starting position is to be reached, when the search continues a line. */
+    reach?: number;
     /** Games the rates of a position are worth when shrinking its moves. */
     shrinkage: number;
     /** Standard errors taken off a value before comparing it. */
@@ -99,6 +111,13 @@ export type SearchParams = {
     smoothing: number;
     /** Move played first instead of the one the search would choose. */
     forcedMove?: string;
+    /**
+     * What of the tree is kept: the engine's line below the positions the
+     * explorer leaves is only played out for that. Defaults to the whole tree.
+     */
+    mode?: "line" | "tree";
+    /** Plies of the tree that are kept, the engine's line being played out that far only. */
+    keepPlies?: number;
 };
 
 export type SearchStats = {
@@ -151,6 +170,8 @@ export async function searchBestLine(
 ): Promise<{ root: SearchNode; stats: SearchStats }> {
     const drawWeight = drawWeightOf(params.metric);
     const options = backupOptionsOf(params.risk);
+    const trustGames = Math.max(params.minGamesPerMove, TRUST_FLOOR);
+    const keepPlies = params.keepPlies ?? Number.POSITIVE_INFINITY;
     const stats: SearchStats = {
         expanded: 0,
         pruned: 0,
@@ -164,7 +185,7 @@ export async function searchBestLine(
         fen: params.fen,
         studied: turnOf(params.fen) === params.color,
         ply: 0,
-        reach: 1,
+        reach: params.reach ?? 1,
         outcome: { wins: 0, draws: 0, losses: 0 },
         value: { mean: 0.5, sigma: SIGMA_FLOOR, source: "engine" },
     };
@@ -219,7 +240,8 @@ export async function searchBestLine(
             expansions: 0,
         };
         node.edges = [edge];
-        node.value = edge.value;
+        // A position valued on its own games keeps that value: the engine only plays on.
+        if (!node.pinned) node.value = edge.value;
         attachChild(node, edge, node.reach);
     }
 
@@ -239,14 +261,65 @@ export async function searchBestLine(
         };
     }
 
+    /** A line of the engine for a move the explorer has no games of, as an edge. */
+    function engineEdge(node: SearchNode, line: BestMoves, status: EdgeStatus): Edge {
+        return {
+            san: line.sanMoves[0],
+            uci: line.uciMoves[0],
+            outcome: { wins: 0, draws: 0, losses: 0 },
+            probability: 0,
+            status,
+            value: engineValue(line.score, params.color, drawWeight, drawRateOf(node)),
+            expansions: 0,
+        };
+    }
+
+    /**
+     * The engine's first lines stop at its MultiPV. When the last one is still
+     * within tolerance, moves it ranks lower may be too, and those played often
+     * enough to be ranked on their results must not be left out for that: one
+     * more analysis, restricted to the most played of them, checks them at the
+     * same depth. Positions where the fifth line is already out of tolerance
+     * pay nothing.
+     */
+    async function withPlayedMoves(
+        node: SearchNode,
+        lines: BestMoves[],
+        explorer: ExplorerPosition,
+        enough: (move: ExplorerMove) => boolean,
+    ): Promise<BestMoves[]> {
+        const last = lines[lines.length - 1];
+        if (lines.length < MAX_CANDIDATES || !last) return lines;
+        if (!admissibleMoves(lines, turnOf(node.fen), params.tolerance).includes(last)) {
+            return lines;
+        }
+        const proposed = new Set(lines.map((line) => sanKey(line.sanMoves[0])));
+        const left = explorer.moves
+            .filter((move) => !proposed.has(sanKey(move.san)) && enough(move))
+            .sort(
+                (a, b) =>
+                    totalGames(outcomeOf(b, params.color)) - totalGames(outcomeOf(a, params.color)),
+            )
+            .slice(0, MAX_EXTRA_CANDIDATES);
+        if (left.length === 0) return lines;
+        const more = await deps.analyze(node.fen, {
+            purpose: "candidates",
+            multipv: left.length,
+            searchMoves: left.map((move) => uciOf(node.fen, move.san) ?? move.uci),
+        });
+        // An engine that ignored the restriction says nothing about those moves.
+        const asked = new Set(left.map((move) => sanKey(move.san)));
+        return [...lines, ...more.filter((line) => asked.has(sanKey(line.sanMoves[0])))];
+    }
+
     /**
      * The move the search plays for the studied side, and the alternatives.
-     * Candidates are the moves played often enough to be ranked on their
-     * results, wherever the engine ranks them: a strong practical move is not
-     * left out for being the engine's sixth choice. Whether they are within
-     * the engine's tolerance is only checked once the search goes on below
-     * them (`checkChosen`, `checkPath`), so that positions it never gets to cost no
-     * analysis at all.
+     * The engine proposes the candidates: its first lines at the precise depth,
+     * those within its tolerance being kept, and the played moves it ranks lower
+     * when it may have left some out (`withPlayedMoves`).
+     * They are then ranked on the results of the games where they were played;
+     * one with too few games is not, and when none can be, the engine's best
+     * move is played.
      */
     async function expandStudied(node: SearchNode, explorer: ExplorerPosition) {
         const moveGames = (move: ExplorerMove) => totalGames(outcomeOf(move, params.color));
@@ -254,27 +327,53 @@ export async function searchBestLine(
         const enough = (move: ExplorerMove) =>
             moveGames(move) >= params.minGamesPerMove &&
             moveGames(move) >= params.minMoveShare * positionGames;
-        const contenders = explorer.moves
-            .filter(enough)
-            .sort((a, b) => moveGames(b) - moveGames(a))
-            .slice(0, MAX_CANDIDATES)
-            .map((move) => explorerEdge(node, move, "contender"));
-        const listed = explorer.moves
-            .filter((move) => !enough(move))
-            .slice(0, LISTED_REPLIES)
-            .map((move) => explorerEdge(node, move, "fewGames"));
-        node.edges = [...contenders, ...listed];
+        const first = await deps.analyze(node.fen, {
+            purpose: "candidates",
+            multipv: MAX_CANDIDATES,
+        });
+        const lines = await withPlayedMoves(node, first, explorer, enough);
+        const admissible = admissibleMoves(lines, turnOf(node.fen), params.tolerance);
+        const byMove = new Map(explorer.moves.map((move) => [sanKey(move.san), move]));
+        const edges: Edge[] = [];
+        const proposed = new Set<string>();
+        for (const line of lines) {
+            const key = sanKey(line.sanMoves[0]);
+            const move = byMove.get(key);
+            proposed.add(key);
+            const status: EdgeStatus = !admissible.includes(line)
+                ? "outOfTolerance"
+                : move && enough(move)
+                  ? "contender"
+                  : "fewGames";
+            const edge = move ? explorerEdge(node, move, status) : engineEdge(node, line, status);
+            edge.score = line.score;
+            edge.depth = line.depth;
+            edges.push(edge);
+        }
+        // An engine with no line proposes nothing: the most played moves stand in.
+        const standIn = lines.length === 0;
+        const rest = explorer.moves
+            .filter((move) => !proposed.has(sanKey(move.san)))
+            .sort((a, b) => moveGames(b) - moveGames(a));
+        let standing = 0;
+        let listed = 0;
+        for (const move of rest) {
+            if (standIn && enough(move) && standing < MAX_CANDIDATES) {
+                edges.push(explorerEdge(node, move, "contender"));
+                standing++;
+            } else if (listed < LISTED_REPLIES) {
+                edges.push(explorerEdge(node, move, enough(move) ? "other" : "fewGames"));
+                listed++;
+            }
+        }
+        node.edges = edges;
+        const contenders = edges.filter((edge) => edge.status === "contender");
         if (contenders.length === 0) {
-            await engineDecides(node);
+            engineDecides(node, lines);
             return;
         }
         for (const edge of contenders) attachChild(node, edge, node.reach);
         recordGain(node, contenders);
-        // Nothing will be searched below these moves, which would have checked them.
-        if (node.ply + 1 >= params.maxPlies) {
-            stats.pruned += backup(node, options).pruned;
-            await checkChosen(node);
-        }
     }
 
     /**
@@ -305,127 +404,21 @@ export async function searchBestLine(
         return { maxPlies: params.maxPlies, choiceGain };
     }
 
-    /** No candidate can be ranked on its results: the engine decides, at the precise depth. */
-    async function engineDecides(node: SearchNode) {
-        const [best] = await deps.analyze(node.fen, { purpose: "decision", multipv: 1 });
+    /** No candidate can be ranked on its results: the engine's best move is played. */
+    function engineDecides(node: SearchNode, lines: BestMoves[]) {
+        const [best] = lines;
         if (!best) {
             node.stopped = "noMove";
             return;
         }
-        const san = best.sanMoves[0];
-        const edges = node.edges ?? [];
-        const known = edges.find((edge) => sanKey(edge.san) === sanKey(san));
-        const chosen: Edge = known ?? {
-            san,
-            uci: best.uciMoves[0],
-            outcome: { wins: 0, draws: 0, losses: 0 },
-            probability: 0,
-            status: "chosen",
-            value: node.value,
-            expansions: 0,
-        };
-        chosen.score = best.score;
-        chosen.depth = best.depth;
-        chosen.checked = true;
+        const chosen = (node.edges ?? []).find(
+            (edge) => sanKey(edge.san) === sanKey(best.sanMoves[0]),
+        );
+        if (!chosen) return;
         chosen.status = "chosen";
         chosen.value = engineValue(best.score, params.color, drawWeight, drawRateOf(node));
         chosen.decidedBy = "engineChoice";
-        if (!known) node.edges = [chosen, ...edges];
         attachChild(node, chosen, node.reach);
-    }
-
-    /**
-     * Compares one candidate with the engine's best move, at the precise
-     * depth: the engine's best line (kept for the other candidates of the
-     * position), and the candidate's own when it is not the same move. A
-     * candidate out of tolerance is dropped. Returns whether it was.
-     */
-    async function checkEdge(node: SearchNode, edge: Edge): Promise<boolean> {
-        edge.checked = true;
-        node.engineLines ??= await deps.analyze(node.fen, { purpose: "candidates", multipv: 1 });
-        const [best] = node.engineLines;
-        // An engine with no line tells us nothing.
-        if (!best) return false;
-        const sameMove = (line: BestMoves) => sanKey(line.sanMoves[0]) === sanKey(edge.san);
-        let line: BestMoves | undefined = sameMove(best) ? best : undefined;
-        if (!line) {
-            [line] = await deps.analyze(node.fen, {
-                purpose: "candidates",
-                multipv: 1,
-                searchMoves: [edge.uci],
-            });
-        }
-        // An engine that ignored the restriction tells us nothing about it.
-        if (!line || !sameMove(line)) return false;
-        edge.score = line.score;
-        edge.depth = line.depth;
-        const lines = line === best ? [best] : [best, line];
-        if (admissibleMoves(lines, turnOf(node.fen), params.tolerance).includes(line)) return false;
-        edge.status = "outOfTolerance";
-        return true;
-    }
-
-    /**
-     * Compares with the engine the move chosen at a studied node, and the one
-     * that replaces it when it is rejected, until the move chosen has been
-     * checked. The other candidates are only checked if they ever come to be
-     * chosen, so that they cost no analysis until then. When a chosen move is
-     * dropped, the ones dropped only for being worse than it compete again.
-     */
-    async function checkChosen(node: SearchNode) {
-        for (;;) {
-            const chosen = node.edges?.find((edge) => edge.status === "chosen");
-            if (!chosen || chosen.checked || deps.isCancelled?.()) break;
-            if (await checkEdge(node, chosen)) {
-                for (const edge of node.edges ?? []) if (edge.status === "pruned") revive(edge);
-            }
-            stats.pruned += backup(node, options).pruned;
-        }
-        if (!node.stopped && liveEdges(node).length === 0) {
-            await engineDecides(node);
-            stats.pruned += backup(node, options).pruned;
-        }
-    }
-
-    /** Puts back in competition a candidate dropped against a move that is now gone. */
-    function revive(edge: Edge) {
-        edge.status = "contender";
-    }
-
-    /**
-     * Checks the moves that lead to a node about to be opened, from the root
-     * down, so that no position is searched below a move the engine rejects.
-     */
-    async function checkPath(node: SearchNode) {
-        const path: { parent: SearchNode; edge: Edge }[] = [];
-        for (let current = node; current.parent; current = current.parent.node) {
-            const { node: parent, edge } = current.parent;
-            if (parent.studied && !edge.checked) path.unshift({ parent, edge });
-        }
-        for (const { parent, edge } of path) {
-            if (!isLive(node)) return;
-            if (edge.checked) continue;
-            if (await checkEdge(parent, edge)) {
-                for (const other of parent.edges ?? [])
-                    if (other.status === "pruned") revive(other);
-            }
-            stats.pruned += backup(parent, options).pruned;
-            if (liveEdges(parent).length === 0) await engineDecides(parent);
-        }
-    }
-
-    /** Checks the moves the tree ends up playing that the search never had to. */
-    async function checkPlayed(node: SearchNode) {
-        if (deps.isCancelled?.()) return;
-        if (node.studied && node.edges) {
-            await checkChosen(node);
-            const chosen = node.edges.find((edge) => edge.status === "chosen");
-            if (chosen?.child) await checkPlayed(chosen.child);
-            return;
-        }
-        for (const edge of node.edges ?? []) {
-            if (edge.status === "reply" && edge.child) await checkPlayed(edge.child);
-        }
     }
 
     /**
@@ -548,22 +541,26 @@ export async function searchBestLine(
         };
     }
 
-    async function expand(node: SearchNode) {
+    /** Settles a position where the game is over, or that cannot be read. */
+    function settleIfOver(node: SearchNode): boolean {
         const position = positionOf(node.fen);
         if (!position) {
             node.stopped = "noMove";
-            return;
+            return true;
         }
-        if (position.isEnd()) {
-            const result = position.isCheckmate()
-                ? position.turn === params.color
-                    ? "loss"
-                    : "win"
-                : "draw";
-            node.stopped = position.isCheckmate() ? "checkmate" : "draw";
-            node.value = terminalValue(result, drawWeight);
-            return;
-        }
+        if (!position.isEnd()) return false;
+        const result = position.isCheckmate()
+            ? position.turn === params.color
+                ? "loss"
+                : "win"
+            : "draw";
+        node.stopped = position.isCheckmate() ? "checkmate" : "draw";
+        node.value = terminalValue(result, drawWeight);
+        return true;
+    }
+
+    async function expand(node: SearchNode) {
+        if (settleIfOver(node)) return;
 
         const explorer = await deps.explore(node.fen);
         stats.expanded++;
@@ -581,6 +578,13 @@ export async function searchBestLine(
         if (totalGames(node.outcome) < params.minimumGames) {
             node.stopped = "outOfBook";
             stats.outOfBook++;
+            if (totalGames(node.outcome) >= trustGames) {
+                // The games say how the position goes; the engine only has to say how
+                // the line goes on, which is settled for the lines kept (`playOutLines`).
+                node.value = statsValue(node.outcome, node.rates, params.shrinkage, drawWeight);
+                node.pinned = true;
+                return;
+            }
             await followEngine(node);
             return;
         }
@@ -601,7 +605,6 @@ export async function searchBestLine(
             score: line?.score,
             status: "chosen",
             forced: true,
-            checked: true,
             value:
                 totalGames(outcome) >= params.minGamesPerMove && node.rates
                     ? statsValue(outcome, node.rates, params.shrinkage, drawWeight)
@@ -645,30 +648,68 @@ export async function searchBestLine(
         deps.onProgress?.({ ...stats }, root);
     }
 
-    await visit(root);
-    for (;;) {
-        for (;;) {
-            if (deps.isCancelled?.()) {
-                stats.cancelled = true;
-                break;
+    /**
+     * Plays the engine on from the positions valued on their games alone, in
+     * the lines that are kept: nothing the engine plays there can change a
+     * decision, so none of it was looked at while searching, and no explorer
+     * request is needed (a position has fewer games than the one before it).
+     */
+    async function playOutLines() {
+        const walk = async (node: SearchNode): Promise<void> => {
+            if (deps.isCancelled?.() || node.ply >= keepPlies) return;
+            if (node.pinned && !node.edges) {
+                for (let current: SearchNode | undefined = node; current; ) {
+                    if (deps.isCancelled?.() || current.stopped === "maxPly") return;
+                    if (current.ply >= keepPlies) return;
+                    if (current !== node) current.stopped ??= "outOfBook";
+                    if (settleIfOver(current)) return;
+                    await followEngine(current);
+                    current = current.edges?.[0]?.child;
+                }
+                return;
             }
-            if (stats.expanded >= MAX_EXPANDED) {
-                stats.exhausted = true;
-                break;
+            for (const edge of keptEdges(node, params.mode ?? "tree")) {
+                if (edge.child) await walk(edge.child);
             }
-            const frontier = nextPositions(root, options, lookahead());
-            const node = frontier.pop();
-            if (!node) break;
-            prefetchAhead(frontier);
-            await checkPath(node);
-            if (!isLive(node)) continue;
-            await visit(node);
-        }
-        if (stats.cancelled) break;
-        // A move rejected now brings back positions to search, budget allowing.
-        await checkPlayed(root);
-        if (stats.exhausted || nextPositions(root, options, lookahead()).size === 0) break;
+        };
+        await walk(root);
     }
+
+    /**
+     * Runs a step of the search. One that fails because the search was stopped
+     * (an analysis the engine gave up, a request waiting out a rate limit) is a
+     * stop, not a failure: the tree found so far is returned.
+     */
+    async function stoppable(step: () => Promise<void>): Promise<boolean> {
+        try {
+            await step();
+            return true;
+        } catch (e) {
+            if (!deps.isCancelled?.()) throw e;
+            stats.cancelled = true;
+            return false;
+        }
+    }
+
+    if (!(await stoppable(() => visit(root)))) return { root, stats };
+    for (;;) {
+        if (deps.isCancelled?.()) {
+            stats.cancelled = true;
+            break;
+        }
+        if (stats.expanded >= MAX_EXPANDED) {
+            stats.exhausted = true;
+            break;
+        }
+        const frontier = nextPositions(root, options, lookahead());
+        const node = frontier.pop();
+        if (!node) break;
+        prefetchAhead(frontier);
+        if (!isLive(node)) continue;
+        if (!(await stoppable(() => visit(node)))) break;
+    }
+    if (!stats.cancelled) await stoppable(playOutLines);
+    if (deps.isCancelled?.()) stats.cancelled = true;
     return { root, stats };
 }
 
