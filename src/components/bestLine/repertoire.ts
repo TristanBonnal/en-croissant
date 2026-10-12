@@ -9,12 +9,13 @@ import {
     type FileMetadata,
     processEntriesRecursively,
 } from "@/components/files/file";
-import { tabsAtom } from "@/state/atoms";
+import { tabFamily, tabsAtom } from "@/state/atoms";
 import { createDebouncedSessionStorage } from "@/state/store/debouncedStorage";
 import { createTreeStore, type TreeMove, type TreeStoreState } from "@/state/store/tree";
 import { getPGN, headersToPGN, parsePGN } from "@/utils/chess";
 import { positionFromFen } from "@/utils/chessops";
-import { createFile } from "@/utils/files";
+import { createFile, openFile } from "@/utils/files";
+import type { Tab } from "@/utils/tabs";
 import type { TreeState } from "@/utils/treeReducer";
 import { unwrap } from "@/utils/unwrap";
 
@@ -92,6 +93,16 @@ export async function createRepertoire(
     return result.value;
 }
 
+/** Tab showing the first game of a file: where that file's unsaved changes live. */
+export function findRepertoireTab(tabs: Tab[], path: string): Tab | undefined {
+    return tabs.find(
+        (tab) =>
+            (tab.gameOrigin.kind === "file" || tab.gameOrigin.kind === "temp_file") &&
+            tab.gameOrigin.file.path === path &&
+            tab.gameOrigin.gameNumber === 0,
+    );
+}
+
 /**
  * Adds moves to the first game of a repertoire file. When the file is open in
  * a tab, the moves are added to that tab (saved from there) so its unsaved
@@ -107,14 +118,7 @@ export async function addToRepertoire(
         return merged;
     };
 
-    const openTab = getDefaultStore()
-        .get(tabsAtom)
-        .find(
-            (tab) =>
-                (tab.gameOrigin.kind === "file" || tab.gameOrigin.kind === "temp_file") &&
-                tab.gameOrigin.file.path === file.path &&
-                tab.gameOrigin.gameNumber === 0,
-        );
+    const openTab = findRepertoireTab(getDefaultStore().get(tabsAtom), file.path);
     if (openTab) {
         const storage = createDebouncedSessionStorage<TreeStoreState>();
         const stored = storage.getItem(openTab.value);
@@ -136,4 +140,20 @@ export async function addToRepertoire(
     });
     unwrap(await commands.writeGame(file.path, 0, `${content}\n\n`));
     return "file";
+}
+
+/**
+ * Opens a repertoire in Practice mode: in its tab when it is already open (the
+ * tab holds the moves just added and any unsaved change), in a new tab otherwise.
+ */
+export async function practiceRepertoire(
+    file: FileMetadata,
+    setTabs: React.Dispatch<React.SetStateAction<Tab[]>>,
+    setActiveTab: React.Dispatch<React.SetStateAction<string | null>>,
+) {
+    const store = getDefaultStore();
+    const openTab = findRepertoireTab(store.get(tabsAtom), file.path);
+    const id = openTab ? openTab.value : await openFile(file, setTabs, setActiveTab);
+    store.set(tabFamily(id), "practice");
+    setActiveTab(id);
 }

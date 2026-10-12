@@ -40,6 +40,11 @@ const MOVES = Number(process.env.E2E_MOVES ?? 4);
 const REACH = Number(process.env.E2E_REACH ?? 0.05);
 // Network time added to each explorer request (the real one answers in 100-500 ms).
 const EXPLORER_MS = Number(process.env.E2E_EXPLORER_MS ?? 0);
+// E2E_APP=1 searches with the app's own settings (line mode, 6 moves, its thresholds) instead of
+// the small tree of the other checks; E2E_OLD=1 gives it the defaults it had before 2026-10-12;
+// E2E_MINGAMES sets the games a position needs to be judged by its statistics.
+const APP = process.env.E2E_APP === "1";
+const OLD = process.env.E2E_OLD === "1";
 
 const { analyzePosition, fetchMock, cancelAnalysis } = vi.hoisted(() => ({
     analyzePosition: vi.fn(),
@@ -180,11 +185,17 @@ function configOf(
             useCloudEval: false,
             depth: PRECISE,
             fastDepth: FAST,
-            fullMoves: MOVES,
-            mode: "tree",
-            reachThreshold: REACH,
-            minimumGames: 2000,
-            minGamesPerMove: 30,
+            ...(APP
+                ? {}
+                : {
+                      fullMoves: MOVES,
+                      mode: "tree" as const,
+                      reachThreshold: REACH,
+                      minimumGames: 2000,
+                      minGamesPerMove: 30,
+                  }),
+            ...(OLD ? { toleranceMode: "pawns" as const, minimumGames: 5000 } : {}),
+            ...(process.env.E2E_MINGAMES ? { minimumGames: Number(process.env.E2E_MINGAMES) } : {}),
             ...over,
         },
         engine: {

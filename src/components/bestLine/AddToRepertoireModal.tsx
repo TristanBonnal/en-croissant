@@ -10,13 +10,20 @@ import {
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { useLoaderData } from "@tanstack/react-router";
+import { useAtom } from "jotai";
 import { useContext, useState } from "react";
 import { useTranslation } from "react-i18next";
 import useSWR, { mutate } from "swr";
 import { TreeStateContext } from "@/components/common/TreeStateContext";
-import type { BestLineResult } from "@/state/atoms";
+import { activeTabAtom, type BestLineResult, tabsAtom } from "@/state/atoms";
 import { getNodeAtPath } from "@/utils/treeReducer";
-import { addToRepertoire, createRepertoire, listRepertoires, repertoireColor } from "./repertoire";
+import {
+  addToRepertoire,
+  createRepertoire,
+  listRepertoires,
+  practiceRepertoire,
+  repertoireColor,
+} from "./repertoire";
 import { toTreeMoves } from "./runner";
 
 /** Moves played from the root of the move tree to `path`. */
@@ -36,6 +43,8 @@ export default function AddToRepertoireModal({
   const { t } = useTranslation();
   const { documentDir } = useLoaderData({ from: "/" });
   const store = useContext(TreeStateContext)!;
+  const [, setTabs] = useAtom(tabsAtom);
+  const [, setActiveTab] = useAtom(activeTabAtom);
 
   const [target, setTarget] = useState<"existing" | "new">("existing");
   const [selected, setSelected] = useState<string | null>(null);
@@ -53,8 +62,9 @@ export default function AddToRepertoireModal({
     () => repertoireColor(selectedFile!),
   );
   const targetColor = target === "existing" ? selectedColor : color;
+  const ready = target === "existing" ? !!selectedFile : !!name.trim();
 
-  async function add() {
+  async function add(train: boolean) {
     setError(null);
     setSaving(true);
     try {
@@ -76,6 +86,7 @@ export default function AddToRepertoireModal({
         message: where === "tab" ? t("BestLine.Repertoire.AddedToTab") : "",
       });
       onClose();
+      if (train) await practiceRepertoire(file, setTabs, setActiveTab);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -127,12 +138,11 @@ export default function AddToRepertoireModal({
         )}
         {error && <Alert color="red">{error}</Alert>}
         <Group justify="right">
-          <Button
-            onClick={add}
-            loading={saving}
-            disabled={target === "existing" ? !selectedFile : !name.trim()}
-          >
+          <Button variant="default" onClick={() => add(false)} loading={saving} disabled={!ready}>
             {t("BestLine.Repertoire.Add")}
+          </Button>
+          <Button onClick={() => add(true)} loading={saving} disabled={!ready}>
+            {t("BestLine.Repertoire.AddAndTrain")}
           </Button>
         </Group>
       </Stack>

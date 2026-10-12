@@ -1,7 +1,8 @@
 import { INITIAL_FEN } from "chessops/fen";
 import { expect, test } from "vitest";
-import { mergeIntoRepertoire } from "@/components/bestLine/repertoire";
+import { findRepertoireTab, mergeIntoRepertoire } from "@/components/bestLine/repertoire";
 import { createTreeStore } from "@/state/store/tree";
+import type { Tab } from "@/utils/tabs";
 import { defaultTree, getNodeAtPath, type TreeState } from "@/utils/treeReducer";
 
 function treeWith(moves: string[]): TreeState {
@@ -60,4 +61,43 @@ test("mergeIntoRepertoire refuses a line from another starting position", () => 
 
 test("mergeIntoRepertoire refuses moves that cannot be played", () => {
     expect(mergeIntoRepertoire(treeWith([]), INITIAL_FEN, ["e5"], [])).toBeNull();
+});
+
+function tabOn(value: string, path: string, gameNumber = 0, kind: "file" | "temp_file" = "file") {
+    return {
+        name: value,
+        value,
+        type: "analysis",
+        gameOrigin: {
+            kind,
+            gameNumber,
+            file: {
+                type: "file",
+                name: path,
+                path,
+                numGames: 1,
+                metadata: { type: "repertoire", tags: [] },
+                lastModified: 0,
+            },
+        },
+    } as Tab;
+}
+
+test("findRepertoireTab finds the tab showing the first game of the file", () => {
+    const tabs = [tabOn("a", "/docs/other.pgn"), tabOn("b", "/docs/rep.pgn")];
+    expect(findRepertoireTab(tabs, "/docs/rep.pgn")?.value).toBe("b");
+});
+
+test("findRepertoireTab ignores tabs on another game of the file or without a file", () => {
+    const tabs = [
+        tabOn("a", "/docs/rep.pgn", 3),
+        { name: "n", value: "n", type: "new", gameOrigin: { kind: "none" } } as Tab,
+    ];
+    expect(findRepertoireTab(tabs, "/docs/rep.pgn")).toBeUndefined();
+});
+
+test("findRepertoireTab also matches a temporary file", () => {
+    expect(
+        findRepertoireTab([tabOn("t", "/tmp/rep.pgn", 0, "temp_file")], "/tmp/rep.pgn")?.value,
+    ).toBe("t");
 });

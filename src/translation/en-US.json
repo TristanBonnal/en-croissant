@@ -101,6 +101,7 @@
     "BestLine.Reason.Trap": "Trap",
     "BestLine.Reason.Trap.Help": "A mistake the opponent plays often and really does lose after in practice.",
     "BestLine.Repertoire.Add": "Add to repertoire",
+    "BestLine.Repertoire.AddAndTrain": "Add and practice",
     "BestLine.Repertoire.Added": "Added to {{name}}",
     "BestLine.Repertoire.AddedToTab": "The repertoire is open in a tab: save it from there.",
     "BestLine.Repertoire.ColorMismatch": "This repertoire is for the other side.",

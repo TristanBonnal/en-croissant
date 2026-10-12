@@ -322,6 +322,36 @@ export class World {
         }, 0);
     }
 
+    /**
+     * How sound the moves of `choose` are: the engine loss of every move the
+     * studied side plays, summed with the weight of the opponent replies that
+     * lead to it (`loss / weight` is the mean loss per move). Positions the
+     * policy has no move for are left to chance and count for nothing.
+     */
+    lossOf(
+        choose: (node: WorldNode) => string | undefined,
+        { maxPlies, minReach }: { maxPlies: number; minReach: number },
+        node: WorldNode = this.root,
+        reach = 1,
+    ): { loss: number; weight: number } {
+        const none = { loss: 0, weight: 0 };
+        if (node.ply - this.root.ply >= maxPlies || node.moves.length === 0) return none;
+        if (node.studiedToMove) {
+            const san = choose(node);
+            const move = san ? node.moves.find((m) => sanKey(m.san) === sanKey(san)) : undefined;
+            if (!move) return none;
+            const below = this.lossOf(choose, { maxPlies, minReach }, move.child, reach);
+            return { loss: below.loss + reach * move.loss, weight: below.weight + reach };
+        }
+        const mostPlayed = node.moves.reduce((a, b) => (b.pop > a.pop ? b : a));
+        return node.moves.reduce((acc, move) => {
+            const r = reach * move.pop;
+            if (r < minReach && move !== mostPlayed) return acc;
+            const below = this.lossOf(choose, { maxPlies, minReach }, move.child, r);
+            return { loss: acc.loss + below.loss, weight: acc.weight + below.weight };
+        }, none);
+    }
+
     /** The best a careful player can do: true expectimax among the moves the engine allows. */
     oracle(
         tolerance: number,

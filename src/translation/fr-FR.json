@@ -101,6 +101,7 @@
     "BestLine.Reason.Trap": "Piège",
     "BestLine.Reason.Trap.Help": "Une erreur que l'adversaire joue souvent et après laquelle il perd réellement des points en pratique.",
     "BestLine.Repertoire.Add": "Ajouter au répertoire",
+    "BestLine.Repertoire.AddAndTrain": "Ajouter et s'entraîner",
     "BestLine.Repertoire.Added": "Ajouté à {{name}}",
     "BestLine.Repertoire.AddedToTab": "Le répertoire est ouvert dans un onglet : sauvegardez-le depuis celui-ci.",
     "BestLine.Repertoire.ColorMismatch": "Ce répertoire est pour l'autre camp.",

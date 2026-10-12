@@ -30,7 +30,7 @@ export const bestLineSettingsSchema = z.object({
     reachThreshold: z.number().min(0.001).max(0.5).default(0.02),
     trapBranching: z.boolean().default(false),
     trapMinShare: z.number().min(0).max(1).default(0.05),
-    toleranceMode: z.enum(["pawns", "winChance"]).default("pawns"),
+    toleranceMode: z.enum(["pawns", "winChance"]).default("winChance"),
     engineTolerance: z.number().min(0).default(0.3),
     winChanceTolerance: z.number().min(0).default(3),
     metric: z.enum(["wins", "score"]).default("wins"),

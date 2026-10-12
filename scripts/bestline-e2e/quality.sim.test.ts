@@ -34,6 +34,7 @@ async function simulate(
     const diffs: Record<string, number[]> = { bestScore: [], oracle: [] };
     for (const name of Object.keys(variants)) diffs[name] = [];
     const absolute: number[] = [];
+    const losses: Record<string, { loss: number; weight: number }> = {};
     const requests: Record<string, { explores: number; analyses: number }> = {};
     let expanded = 0;
     for (let seed = 1; seed <= SEEDS; seed++) {
@@ -52,7 +53,7 @@ async function simulate(
             fen: w.root.fen,
             color: studied,
             maxPlies: PLIES,
-            tolerance: { mode: "pawns", value: 0.3 },
+            tolerance: { mode: "winChance", value: 3 },
             minReach: Number(process.env.E2E_REACH ?? 0.02),
             minimumGames: Number(process.env.E2E_MINGAMES ?? 5000),
             minGamesPerMove: Number(process.env.E2E_MINMOVE ?? 100),
@@ -60,6 +61,15 @@ async function simulate(
         const horizon = { maxPlies: PLIES, minReach: base.minReach };
         const value = (choose: (node: WorldNode) => string | undefined) =>
             w.valueOf(choose, horizon);
+        // Engine loss of the moves played, to check that a better score is not bought with weaker moves.
+        const addLoss = (name: string, choose: (node: WorldNode) => string | undefined) => {
+            const { loss, weight } = w.lossOf(choose, horizon);
+            losses[name] ??= { loss: 0, weight: 0 };
+            losses[name].loss += loss;
+            losses[name].weight += weight;
+        };
+        addLoss("mostPlayed", ruleChoice(w, "mostPlayed", base));
+        addLoss("bestScore", ruleChoice(w, "bestScore", base));
         const mostPlayed = value(ruleChoice(w, "mostPlayed", base));
         absolute.push(mostPlayed);
         diffs.bestScore.push(value(ruleChoice(w, "bestScore", base)) - mostPlayed);
@@ -80,52 +90,78 @@ async function simulate(
             if (name === Object.keys(variants)[0]) expanded += found.stats.expanded;
             const chosen = chosenMoves(found.root);
             diffs[name].push(value((node) => chosen.get(node.key)) - mostPlayed);
+            addLoss(name, (node) => chosen.get(node.key));
             // Where the search opened nothing, the simple rule plays: what is left is the
             // quality of its decisions, not how far it looked.
             const fallback = ruleChoice(w, "bestScore", base);
             diffs[`${name} + rule`] ??= [];
+            addLoss(`${name} + rule`, (node) => chosen.get(node.key) ?? fallback(node));
             diffs[`${name} + rule`].push(
                 value((node) => chosen.get(node.key) ?? fallback(node)) - mostPlayed,
             );
         }
     }
     const room = stats(diffs.oracle).mean;
+    const lossOf = (key: string) =>
+        `${(losses[key].loss / Math.max(1e-9, losses[key].weight)).toFixed(1)} cp/move`;
     const paired = (name: string) => stats(diffs[name].map((d, i) => d - diffs.bestScore[i]));
+    const first = Object.keys(variants)[0];
+    const againstFirst = (name: string) => stats(diffs[name].map((d, i) => d - diffs[first][i]));
     const rows = Object.keys(variants).flatMap((name) =>
         [name, `${name} + rule`].map(
             (key) =>
-                `    ${key.padEnd(22)} ${fmt(stats(diffs[key]))} (${((stats(diffs[key]).mean / room) * 100).toFixed(0)}% of the oracle's gain) | vs best raw score ${fmt(paired(key))}` +
+                `    ${key.padEnd(22)} ${fmt(stats(diffs[key]))} (${((stats(diffs[key]).mean / room) * 100).toFixed(0)}% of the oracle's gain) | vs best raw score ${fmt(paired(key))} | vs first variant ${fmt(againstFirst(key))} | loss ${lossOf(key)}` +
                 (requests[key]
                     ? ` | per search: ${(requests[key].explores / SEEDS).toFixed(1)} explorer requests, ${(requests[key].analyses / SEEDS).toFixed(1)} analyses`
                     : ""),
         ),
     );
     return [
-        `games ${String(games).padStart(8)} ${studied.padEnd(5)} | most played ${fmt(stats(absolute))} points | best raw score ${fmt(stats(diffs.bestScore))} | oracle ${fmt(stats(diffs.oracle))} | positions opened ${(expanded / SEEDS).toFixed(0)}`,
+        `games ${String(games).padStart(8)} ${studied.padEnd(5)} | most played ${fmt(stats(absolute))} points | best raw score ${fmt(stats(diffs.bestScore))} | oracle ${fmt(stats(diffs.oracle))} | loss: most played ${lossOf("mostPlayed")}, best raw score ${lossOf("bestScore")} | positions opened ${(expanded / SEEDS).toFixed(0)}`,
         ...rows,
     ].join("\n");
 }
 
-const VARIANTS: Variants = process.env.E2E_SWEEP
-    ? {
-          "default (risk 1, k 100)": {},
-          "risk 0": { risk: 0 },
-          "risk 2": { risk: 2 },
-          "shrinkage 30": { shrinkage: 30 },
-          "shrinkage 300": { shrinkage: 300 },
-          "shrinkage 0, risk 0": { shrinkage: 0, risk: 0 },
-      }
-    : process.env.E2E_TRUST
+/** E2E_VARIANTS='{"name": {"minReach": 0.01}}' compares any search parameters. */
+const VARIANTS: Variants = process.env.E2E_VARIANTS
+    ? { default: {}, ...JSON.parse(process.env.E2E_VARIANTS) }
+    : process.env.E2E_TOLERANCES
       ? {
-            default: {},
+            "pawns 0.3": { tolerance: { mode: "pawns", value: 0.3 } },
             ...Object.fromEntries(
-                process.env.E2E_TRUST.split(",").map((n) => [
-                    `trust ${n}`,
-                    { trustGames: Number(n) },
+                process.env.E2E_TOLERANCES.split(",").map((n) => [
+                    `win chance ${n}`,
+                    { tolerance: { mode: "winChance", value: Number(n) } },
                 ]),
             ),
         }
-      : { default: {} };
+      : process.env.E2E_SETTINGS
+        ? {
+              "score, pawns (0.3)": { tolerance: { mode: "pawns", value: 0.3 } },
+              "wins, pawns (0.3)": { metric: "wins", tolerance: { mode: "pawns", value: 0.3 } },
+              "score, win chance (3)": {},
+              "wins, win chance (3)": { metric: "wins" },
+          }
+        : process.env.E2E_SWEEP
+          ? {
+                "default (risk 1, k 100)": {},
+                "risk 0": { risk: 0 },
+                "risk 2": { risk: 2 },
+                "shrinkage 30": { shrinkage: 30 },
+                "shrinkage 300": { shrinkage: 300 },
+                "shrinkage 0, risk 0": { shrinkage: 0, risk: 0 },
+            }
+          : process.env.E2E_TRUST
+            ? {
+                  default: {},
+                  ...Object.fromEntries(
+                      process.env.E2E_TRUST.split(",").map((n) => [
+                          `trust ${n}`,
+                          { trustGames: Number(n) },
+                      ]),
+                  ),
+              }
+            : { default: {} };
 
 test.skipIf(!SIM)(
     "search against simple rules and the oracle",

@@ -81,3 +81,43 @@ test("the moves of the search do at least as well as the best raw score", async 
         });
     }
 });
+
+// --- how sound the chosen moves are -------------------------------------------
+
+test("lossOf measures the engine loss of the moves a policy plays", () => {
+    const world = new World({
+        seed: 3,
+        studied: "white",
+        games: 300_000,
+        branching: 3,
+        horizon: 3,
+    });
+    const horizon = { maxPlies: 1, minReach: 0.02 };
+    const best = world.root.moves.reduce((a, b) => (b.loss < a.loss ? b : a));
+    const worst = world.root.moves.reduce((a, b) => (b.loss > a.loss ? b : a));
+
+    expect(best.loss).toBe(0);
+    expect(worst.loss).toBeGreaterThan(0);
+    expect(world.lossOf(() => best.san, horizon)).toEqual({ loss: 0, weight: 1 });
+    expect(world.lossOf(() => worst.san, horizon)).toEqual({ loss: worst.loss, weight: 1 });
+    // A policy with no move leaves the game to chance: nothing to judge.
+    expect(world.lossOf(() => undefined, horizon)).toEqual({ loss: 0, weight: 0 });
+});
+
+test("lossOf weights each decision by how often its position is reached", () => {
+    const world = new World({
+        seed: 3,
+        studied: "white",
+        games: 300_000,
+        branching: 3,
+        horizon: 4,
+    });
+    const horizon = { maxPlies: 3, minReach: 0.0001 };
+    const worst = (node: WorldNode) =>
+        node.moves.reduce((a, b) => (b.loss > a.loss ? b : a), node.moves[0])?.san;
+    const { loss, weight } = world.lossOf(worst, horizon);
+    // Two decisions of the studied side along every opponent reply, at most.
+    expect(weight).toBeGreaterThan(1);
+    expect(weight).toBeLessThanOrEqual(2 + 1e-9);
+    expect(loss / weight).toBeGreaterThan(0);
+});

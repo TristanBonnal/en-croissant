@@ -65,6 +65,22 @@ test("the settings use the wins metric by default", () => {
     expect(bestLineSettingsSchema.parse({ ranking: "wilson" }).metric).toBe("wins");
 });
 
+test("the settings judge the engine's tolerance in win chance by default", () => {
+    const settings = bestLineSettingsSchema.parse({});
+    expect(settings.toleranceMode).toBe("winChance");
+    expect(settings.winChanceTolerance).toBe(3);
+});
+
+// 1000 games rated better in the simulation but made a real search 3.4 times slower (2000: twice).
+test("the settings trust the statistics of a position from 5000 games", () => {
+    expect(bestLineSettingsSchema.parse({}).minimumGames).toBe(5000);
+    expect(bestLineSettingsSchema.parse({ minimumGames: 1000 }).minimumGames).toBe(1000);
+});
+
+test("a tolerance mode already stored is kept", () => {
+    expect(bestLineSettingsSchema.parse({ toleranceMode: "pawns" }).toleranceMode).toBe("pawns");
+});
+
 // --- tolerance ---------------------------------------------------------------
 
 test("admissibleMoves keeps moves within the pawn tolerance of the best move (white)", () => {
