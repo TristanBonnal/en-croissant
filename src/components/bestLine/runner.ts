@@ -42,6 +42,13 @@ import {
     type SearchParams,
 } from "@/utils/bestLine/search";
 import {
+    createLimiter,
+    createWorkerPool,
+    MAX_WORKERS,
+    planEngines,
+    type WorkerPool,
+} from "@/utils/bestLinePool";
+import {
     analysisKey,
     clearBestLineCaches,
     engineCache,
@@ -71,6 +78,14 @@ const treeStores = new Map<string, TreeStore>();
 const cancelFlags = new Map<string, boolean>();
 
 const analysisId = (tab: string) => `bestline_${tab}`;
+/** Engine of a worker: the first keeps the tab's own name, the others are numbered. */
+const workerId = (tab: string, worker: number) =>
+    worker === 0 ? analysisId(tab) : `${analysisId(tab)}#${worker}`;
+const workerIds = (tab: string) => Array.from({ length: MAX_WORKERS }, (_, i) => workerId(tab, i));
+
+function closeEngines(tab: string) {
+    for (const id of workerIds(tab)) commands.closeAnalysisSession(id);
+}
 
 /**
  * Explorer requests a search keeps running at once. Lichess answers a burst
@@ -91,7 +106,7 @@ function keepSession(tab: string) {
         tab,
         setTimeout(() => {
             sessionTimers.delete(tab);
-            if (!cancelFlags.has(tab)) commands.closeAnalysisSession(analysisId(tab));
+            if (!cancelFlags.has(tab)) closeEngines(tab);
         }, SESSION_IDLE_MS),
     );
 }
@@ -102,12 +117,13 @@ export const liveKeyOf = (tab: string) => `${tab}-live`;
 /** Stops the search of a closed tab and its engine. */
 export function releaseBestLine(tab: string) {
     stopLiveSearch(liveKeyOf(tab));
-    commands.closeAnalysisSession(analysisId(liveKeyOf(tab)));
+    closeEngines(liveKeyOf(tab));
     cancelBestLine(tab);
-    engineQueues.delete(tab);
+    enginePools.delete(liveKeyOf(tab));
+    enginePools.delete(tab);
     clearTimeout(sessionTimers.get(tab));
     sessionTimers.delete(tab);
-    commands.closeAnalysisSession(analysisId(tab));
+    closeEngines(tab);
 }
 
 /**
@@ -152,7 +168,7 @@ export function registerTreeStore(tab: string, store: TreeStore) {
 export function cancelBestLine(tab: string) {
     if (!cancelFlags.has(tab)) return;
     cancelFlags.set(tab, true);
-    commands.cancelAnalysis(analysisId(tab));
+    for (const id of workerIds(tab)) commands.cancelAnalysis(id);
 }
 
 /** Everything the search needs, from the tab's settings. */
@@ -236,19 +252,41 @@ async function cloudLines(
 }
 
 /**
- * Engine analyses of a tab run one at a time: the backend keys its analysis
- * session and its cancel flag by id, so two analyses of the same tab would
- * share a mutex and lose each other's cancel flag.
+ * Engines of a tab. The backend keys an analysis session and its cancel flag by
+ * id, so two analyses on the same engine would share a mutex and lose each
+ * other's cancel flag: each worker of the pool has its own engine, and runs one
+ * analysis at a time.
  */
-const engineQueues = new Map<string, Promise<unknown>>();
+const enginePools = new Map<string, WorkerPool>();
 
-function enqueueAnalysis<T>(tab: string, task: () => Promise<T>): Promise<T> {
-    const queued = (engineQueues.get(tab) ?? Promise.resolve()).then(task, task);
-    engineQueues.set(
-        tab,
-        queued.catch(() => {}),
-    );
-    return queued;
+function poolOf(tab: string, workers: number): WorkerPool {
+    const known = enginePools.get(tab);
+    if (known?.size === workers) return known;
+    if (known) closeEngines(tab);
+    const pool = createWorkerPool(workers);
+    enginePools.set(tab, pool);
+    return pool;
+}
+
+/**
+ * Cloud evaluations asked at once, by every search: the analyses of a search
+ * are asked side by side, and a burst makes Lichess answer with a 429.
+ */
+const CLOUD_CONCURRENCY = 2;
+const limitCloud = createLimiter(CLOUD_CONCURRENCY);
+
+/** Threads the machine has, to share among the engines. */
+function availableCores(): number {
+    return typeof navigator === "undefined" ? 1 : navigator.hardwareConcurrency || 1;
+}
+
+/**
+ * Whether a failed explorer request is worth trying again soon: the connection
+ * dropped or the server failed. A refusal (no token, bad request) stays one.
+ */
+export function isTransientExplorerError(e: unknown): boolean {
+    if (e instanceof LichessHttpError) return e.status >= 500 || e.status === 408;
+    return true;
 }
 
 /** Empty report of a search about to start. */
@@ -278,12 +316,18 @@ export function newSearchReport(settings: BestLineSettings): SearchReport {
  * deep enough, else the local engine, counted in `report`. Results are
  * memoized for the session; the number of lines never exceeds the number of
  * moves the analysis is restricted to, which the engine would never send.
+ *
+ * An engine with threads to share (`planEngines`) runs on several engines side
+ * by side: the analyses the search waits on take the first one free, and `warm`
+ * starts, on the others, the ones it will probably ask for next. `stop` ends
+ * what is still running ahead of need.
  */
 export function createAnalyze(
     tab: string,
     config: SearchConfig,
     report: SearchReport,
     isCancelled: () => boolean = () => false,
+    cores: number = availableCores(),
 ) {
     const { engine, settings } = config;
     const engineOptions = (engine.settings ?? []).map((s) => ({
@@ -291,49 +335,77 @@ export function createAnalyze(
         value: s.value?.toString() ?? "",
     }));
     const engineKey = `${engine.path}|${JSON.stringify(engineOptions)}`;
+    const plan = planEngines(engine.settings ?? undefined, cores);
+    const pool = poolOf(tab, plan.workers);
+    // Each engine gets its share of the threads and of the hash.
+    const workerOptions =
+        plan.threads === undefined
+            ? engineOptions
+            : engineOptions.map((option) => {
+                  if (option.name === "Threads") return { ...option, value: String(plan.threads) };
+                  if (option.name === "Hash") return { ...option, value: String(plan.hash) };
+                  return option;
+              });
+    let stopped = false;
 
-    return (fen: string, request: AnalysisRequest): Promise<BestMoves[]> => {
+    const keyOf = (fen: string, request: AnalysisRequest) => {
         const depth = isPreciseAnalysis(request.purpose) ? report.preciseDepth : report.fastDepth;
         const searchMoves = request.searchMoves ?? [];
         const asked = request.multipv ?? BEST_LINE_MULTIPV;
         const multipv = searchMoves.length > 0 ? Math.min(asked, searchMoves.length) : asked;
         const key = `${engineKey}|${depth}|${multipv}|${searchMoves.join(",")}|${analysisKey(fen)}`;
-        if (engineCache.has(key)) report.cached++;
+        return { key, depth, multipv, searchMoves };
+    };
+
+    /** The analysis, started if it is not under way or done; `ahead` when nothing waits on it yet. */
+    function linesOf(fen: string, request: AnalysisRequest, ahead: boolean): Promise<BestMoves[]> {
+        const { key, depth, multipv, searchMoves } = keyOf(fen, request);
+        if (!ahead && engineCache.has(key)) report.cached++;
         const lines = memoizeAsync(engineCache, key, async () => {
             const cloud =
                 settings.useCloudEval && searchMoves.length === 0
-                    ? await cloudLines(fen, depth, multipv)
+                    ? await limitCloud(() => {
+                          // Waiting for its turn, the search may have been stopped.
+                          if (isCancelled() || (ahead && stopped)) {
+                              throw new Error("Analysis cancelled");
+                          }
+                          return cloudLines(fen, depth, multipv);
+                      })
                     : null;
             if (cloud) {
                 report.cloud++;
                 return cloud;
             }
-            report.engine[request.purpose]++;
-            const start = Date.now();
-            try {
-                return await enqueueAnalysis(tab, async () => {
-                    // The backend only cancels the analysis running, so those
-                    // waiting behind it would each start a full one.
-                    if (isCancelled()) throw new Error("Analysis cancelled");
+            const analyse = async (worker: number) => {
+                // The backend only cancels the analysis running, so those
+                // waiting for an engine would each start a full one.
+                if (isCancelled() || (ahead && stopped)) throw new Error("Analysis cancelled");
+                // A quick look at a position is counted with the other fast analyses.
+                report.engine[request.purpose === "survey" ? "evaluation" : request.purpose]++;
+                const start = Date.now();
+                try {
                     const answer = await commands.analyzePosition(
-                        analysisId(tab),
+                        workerId(tab, worker),
                         engine.path,
                         { t: "Depth", c: depth },
                         fen,
                         [],
                         multipv,
                         searchMoves,
-                        engineOptions,
+                        workerOptions,
                     );
                     // A search the user stopped is not an error to show.
-                    if (answer.status === "error" && isCancelled()) {
+                    if (answer.status === "error" && (isCancelled() || (ahead && stopped))) {
                         throw new Error("Analysis cancelled");
                     }
                     return unwrap(answer);
-                });
-            } finally {
-                report.engineSeconds += (Date.now() - start) / 1000;
-            }
+                } finally {
+                    report.engineSeconds += (Date.now() - start) / 1000;
+                }
+            };
+            // An analysis ahead of need that finds no spare engine after the cloud
+            // lookup waits for its turn like the others.
+            return (ahead ? pool.speculate(analyse) : undefined) ?? pool.run(analyse);
         });
         // An engine that stopped without a line says nothing about the position.
         void lines.then(
@@ -343,7 +415,35 @@ export function createAnalyze(
             () => {},
         );
         return lines;
+    }
+
+    const analyze = (fen: string, request: AnalysisRequest): Promise<BestMoves[]> =>
+        linesOf(fen, request, false);
+
+    /**
+     * Starts an analysis the search will probably ask for soon, when an engine is
+     * spare (one is always left to the analyses the search waits on). Returns the
+     * analysis, under way or done, or false when no engine is spare.
+     */
+    const warm = (fen: string, request: AnalysisRequest): Promise<BestMoves[]> | false => {
+        if (stopped) return false;
+        const known = engineCache.get(keyOf(fen, request).key);
+        if (known) return known;
+        if (pool.spare() === 0) return false;
+        const lines = linesOf(fen, request, true);
+        lines.catch(() => {});
+        return lines;
     };
+
+    /** Ends the analyses still running ahead of need: the search is over. */
+    const stop = async () => {
+        stopped = true;
+        await Promise.all(
+            pool.busy().map((worker) => commands.cancelAnalysis(workerId(tab, worker))),
+        );
+    };
+
+    return Object.assign(analyze, { warm, stop });
 }
 
 /** One line, for the log, of everything a finished search spent its time on. */
@@ -353,7 +453,7 @@ export function formatSearchReport(report: SearchReport): string {
     const round = (seconds: number) => Math.round(seconds);
     return [
         `Best line search: ${round(report.seconds)} s for ${report.moves} moves`,
-        `local engine: ${analyses} analyses in ${round(report.engineSeconds)} s ` +
+        `local engine: ${analyses} analyses, ${round(report.engineSeconds)} s of engine time ` +
             `(fast depth ${report.fastDepth}: ${engine.evaluation} position evaluations; ` +
             `precise depth ${report.preciseDepth}: ${engine.candidates} candidate lists, ` +
             `${engine.decision} engine decisions)`,
@@ -419,6 +519,7 @@ async function run(
                 const start = Date.now();
                 return withRateLimitRetry(() => getLichessGames(fen, explorerOptions, token), {
                     isRateLimited: (e) => e instanceof LichessHttpError && e.status === 429,
+                    isTransient: isTransientExplorerError,
                     sleep,
                     isCancelled,
                     onWait: (ms) => {
@@ -438,6 +539,7 @@ async function run(
 
         const { root, stats } = await searchBestLine(params, {
             analyze,
+            warm: analyze.warm,
             explore,
             prefetch: (fen) => !isCancelled() && prefetch(fen),
             isCancelled,
@@ -459,7 +561,11 @@ async function run(
 
         // The search never analyses the opponent's positions, so the moves a
         // branch ends on get their evaluation here.
-        await evaluateLeaves(root, { mode: config.settings.mode }, { analyze, isCancelled });
+        await evaluateLeaves(
+            root,
+            { mode: config.settings.mode, keepPlies: params.keepPlies },
+            { analyze, isCancelled },
+        );
 
         const nodes = toBestLineNodes(root, outputOptionsOf(config));
         report.moves = countNodes(nodes);
@@ -472,6 +578,8 @@ async function run(
         }));
     } finally {
         searching = false;
+        // Analyses started ahead of need that the search never asked for.
+        await analyze.stop().catch(() => {});
         cancelFlags.delete(tab);
         keepSession(tab);
         report.seconds = (Date.now() - started) / 1000;
@@ -508,13 +616,33 @@ export function startBestLine(tab: string, config: SearchConfig, from?: number[]
 
 const liveRequests = new Map<string, number>();
 
+/** Tab whose board a live search key belongs to. */
+const liveTabOf = (key: string) => (key.endsWith("-live") ? key.slice(0, -"-live".length) : key);
+
+/**
+ * Adds the move a live search chose to the board it searched, at the end of
+ * the line the board is on. The board stays as it is when it has moved on in
+ * the meantime or already has a move there (it is being gone back through).
+ */
+function addLiveMove(tab: string, fen: string, result: BestLineResult) {
+    const tree = treeStores.get(tab);
+    const first = result.nodes[0];
+    if (!tree || !first) return;
+    const state = tree.getState();
+    const here = getNodeAtPath(state.root, state.position);
+    if (here.fen !== fen || here.children.length > 0) return;
+    state.addTree(toTreeMoves([first], result.color, result.metric), state.position);
+}
+
 /**
  * Chooses the move of the studied side in the position of the board, for the
  * live analysis: it looks `liveMoves` of the studied side's moves ahead to
- * judge each candidate, and keeps only the move itself. It has its own result
- * and engine session, apart from the tab's search. A newer request replaces
- * the one still running, and nothing is searched while it is the opponent's
- * turn.
+ * judge each candidate, and keeps only the move itself, which it adds to the
+ * line on the board. The first move is chosen among precise candidates; what
+ * follows only serves to judge it, and is looked at quickly. It has its own
+ * result and engine session, apart from the tab's search. A newer request
+ * replaces the one still running, and nothing is searched while it is the
+ * opponent's turn.
  */
 export async function startLiveSearch(key: string, config: SearchConfig, fen: string) {
     const request = (liveRequests.get(key) ?? 0) + 1;
@@ -525,9 +653,14 @@ export async function startLiveSearch(key: string, config: SearchConfig, fen: st
     }
     if (liveRequests.get(key) !== request || !isTurnOf(fen, config.settings.color)) return;
 
-    const live: SearchConfig = { ...config, settings: { ...config.settings, mode: "tree" } };
+    // Nothing below the first move is kept: no trap is worth opening for it.
+    const live: SearchConfig = {
+        ...config,
+        settings: { ...config.settings, mode: "tree", trapBranching: false },
+    };
     const plies = 2 * config.settings.liveMoves - 1;
-    await run(key, live, searchParamsOf(live, fen, plies, undefined, 1), (nodes) => ({
+    const params = { ...searchParamsOf(live, fen, plies, undefined, 1), surveyBelowRoot: true };
+    await run(key, live, params, (nodes) => ({
         fen,
         color: config.settings.color,
         metric: config.settings.metric,
@@ -537,6 +670,18 @@ export async function startLiveSearch(key: string, config: SearchConfig, fen: st
         inserted: false,
         focus: [0],
     }));
+
+    const store = getDefaultStore();
+    const found = store.get(bestLineResultFamily(key));
+    const failed = store.get(bestLineRunFamily(key)).error !== null;
+    if (
+        config.settings.liveAddMove &&
+        liveRequests.get(key) === request &&
+        found?.fen === fen &&
+        !failed
+    ) {
+        addLiveMove(liveTabOf(key), fen, found);
+    }
 }
 
 /** Stops the live analysis, and forgets the requests still waiting. */
@@ -552,7 +697,7 @@ export function resetLiveSearch(key: string) {
     store.set(bestLineResultFamily(key), null);
     store.set(bestLineRunFamily(key), idleBestLineRun);
     clearBestLineCaches();
-    commands.closeAnalysisSession(analysisId(key));
+    closeEngines(key);
 }
 
 /** Plays `san` instead of the move at `path` of the result, and searches on to the same depth. */
@@ -572,17 +717,23 @@ export function replayMove(tab: string, config: SearchConfig, path: number[], sa
     }));
 }
 
-/** Continues the branch ending with the move at `path` of the result for `fullMoves` moves. */
+/**
+ * Continues the branch ending with the move at `path` of the result for
+ * `fullMoves` moves. The continuation is a single line, the most played reply
+ * at each of the opponent's moves, whatever mode the result was searched in:
+ * it extends the line instead of branching out of it.
+ */
 export function extendLine(tab: string, config: SearchConfig, path: number[], fullMoves: number) {
     const result = getDefaultStore().get(bestLineResultFamily(tab));
     const node = result && nodeAt(result.nodes, path);
     if (!result || !node) return;
+    const single: SearchConfig = { ...config, settings: { ...config.settings, mode: "line" } };
     const params = {
-        ...searchParamsOf(config, fenAfter(node), fullMoves * 2),
+        ...searchParamsOf(single, fenAfter(node), fullMoves * 2),
         color: result.color,
         reach: node.reach,
     };
-    return run(tab, config, params, (nodes) => ({
+    return run(tab, single, params, (nodes) => ({
         ...result,
         nodes: replaceNodeAt(result.nodes, path, {
             ...node,

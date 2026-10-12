@@ -21,6 +21,8 @@ function LiveAnalysis({
   boardFen,
   lookahead,
   onLookahead,
+  addMove,
+  onAddMove,
   studied,
   onReset,
 }: {
@@ -31,6 +33,8 @@ function LiveAnalysis({
   boardFen: string;
   lookahead: number;
   onLookahead: (moves: number) => void;
+  addMove: boolean;
+  onAddMove: (add: boolean) => void;
   studied: "white" | "black";
   onReset: () => void;
 }) {
@@ -63,6 +67,12 @@ function LiveAnalysis({
           {t("BestLine.Live.Reset")}
         </Button>
       </Group>
+      <Switch
+        label={t("BestLine.Live.AddMove")}
+        description={t("BestLine.Live.AddMove.Desc")}
+        checked={addMove}
+        onChange={(e) => onAddMove(e.currentTarget.checked)}
+      />
       {on && !blocker && !isTurnOf(boardFen, studied) && (
         <Text size="sm" c="dimmed">
           {t("BestLine.Live.OpponentTurn")}

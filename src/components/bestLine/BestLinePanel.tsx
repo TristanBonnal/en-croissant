@@ -8,6 +8,7 @@ import {
   Group,
   Input,
   Loader,
+  Menu,
   NumberInput,
   Paper,
   Progress,
@@ -25,6 +26,7 @@ import { useDisclosure } from "@mantine/hooks";
 import {
   IconActivity,
   IconAdjustments,
+  IconArrowForward,
   IconBookmarkPlus,
   IconInfoCircle,
   IconListTree,
@@ -58,6 +60,8 @@ import {
 import {
   type BestLineNode,
   type BestLineSettings,
+  EXTEND_MOVES,
+  mainLinePath,
   movesTo,
   resultPathOf,
   sansBetween,
@@ -625,6 +629,8 @@ function BestLinePanel({ id }: { id: string }) {
               boardFen={currentFen}
               lookahead={settings.liveMoves}
               onLookahead={(moves) => update("liveMoves", moves)}
+              addMove={settings.liveAddMove}
+              onAddMove={(add) => update("liveAddMove", add)}
               studied={settings.color}
               onReset={() => {
                 resetLiveSearch(liveKey);
@@ -650,6 +656,33 @@ function BestLinePanel({ id }: { id: string }) {
               {result && result.nodes.length > 0 && (
                 <>
                   <Group gap="xs">
+                    <Menu position="bottom-start" withinPortal>
+                      <Tooltip label={t("BestLine.ExtendLine.Desc")} multiline w={260} withArrow>
+                        <Menu.Target>
+                          <Button
+                            size="xs"
+                            variant="default"
+                            leftSection={<IconArrowForward size="0.9rem" />}
+                            disabled={!canRun}
+                          >
+                            {t("BestLine.ExtendLine")}
+                          </Button>
+                        </Menu.Target>
+                      </Tooltip>
+                      <Menu.Dropdown>
+                        <Menu.Label>{t("BestLine.Extend")}</Menu.Label>
+                        {EXTEND_MOVES.map((n) => (
+                          <Menu.Item
+                            key={n}
+                            onClick={() =>
+                              run((c) => extendLine(id, c, mainLinePath(result.nodes), n))
+                            }
+                          >
+                            +{n}
+                          </Menu.Item>
+                        ))}
+                      </Menu.Dropdown>
+                    </Menu>
                     <Button
                       size="xs"
                       variant="default"

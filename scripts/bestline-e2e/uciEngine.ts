@@ -97,6 +97,11 @@ export class UciEngine {
         return result;
     }
 
+    /** Ends the search running, as the app does when it cancels an analysis. */
+    stop() {
+        this.send("stop");
+    }
+
     quit() {
         this.send("quit");
         this.proc.kill();

@@ -290,6 +290,7 @@ const cache = new Map<string, LichessCloudData>();
 
 export function clearLichessCloudCache() {
   cache.clear();
+  cloudPausedUntil = 0;
 }
 
 type LichessCloudData = {
@@ -309,15 +310,26 @@ type LichessMate = {
   moves: string;
 };
 
+/** Lichess asks to wait a full minute after a 429 before using the API again. */
+const RATE_LIMIT_PAUSE_MS = 60_000;
+let cloudPausedUntil = 0;
+
 async function getCloudEvaluation(fen: string, multipv: number): Promise<LichessCloudData> {
   if (cache.has(`${fen}-${multipv}`)) {
     return cache.get(`${fen}-${multipv}`)!;
+  }
+  if (Date.now() < cloudPausedUntil) {
+    throw new LichessHttpError("Lichess cloud evaluation paused after a rate limit", 429);
   }
   const url = new URL(`${baseURL}/cloud-eval`);
   url.searchParams.append("fen", fen);
   url.searchParams.append("multiPv", multipv.toString());
 
   const response = await fetch(url.toString(), { headers: apiHeaders() });
+  if (response.status === 429) {
+    cloudPausedUntil = Date.now() + RATE_LIMIT_PAUSE_MS;
+    throw new LichessHttpError("Lichess cloud evaluation rate limited", 429);
+  }
   const data = (await response.json()) as LichessCloudData;
   cache.set(`${fen}-${multipv}`, data);
   return data;

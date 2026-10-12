@@ -126,3 +126,34 @@ test("evaluateLeaves does not hide a failure the user did not ask for", async ()
         ),
     ).rejects.toThrow("engine crashed");
 });
+
+test("evaluateLeaves leaves out a position that follows one of the studied side's own moves", async () => {
+    // The engine already gave that move its evaluation when it chose it.
+    const engine = fakeEngine([30, 20]);
+    const root = await searched(engine, 1);
+    engine.analysed.length = 0;
+
+    const evaluated = await evaluateLeaves(root, { mode: "tree" }, { analyze: engine.analyze });
+
+    expect(evaluated).toBe(0);
+    expect(engine.analysed).toHaveLength(0);
+    // And the move still shows its evaluation.
+    const nodes = toBestLineNodes(root, { mode: "tree", preciseDepth: 18 });
+    expect(nodes[0].score).toBeDefined();
+});
+
+test("evaluateLeaves only looks at the part of the tree that is kept", async () => {
+    const engine = fakeEngine([30, 20]);
+    const root = await searched(engine, 4);
+    engine.analysed.length = 0;
+
+    const evaluated = await evaluateLeaves(
+        root,
+        { mode: "tree", keepPlies: 1 },
+        { analyze: engine.analyze },
+    );
+
+    // Only the first move is kept, and it has its evaluation: nothing to look at below.
+    expect(evaluated).toBe(0);
+    expect(engine.analysed).toHaveLength(0);
+});

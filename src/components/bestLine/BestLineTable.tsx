@@ -21,11 +21,9 @@ import { Fragment, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { match } from "ts-pattern";
 import type { BestLineNode, Candidate, CandidateStatus, MoveReason } from "@/utils/bestLine";
-import { formatPercent, isTrap } from "@/utils/bestLine";
+import { EXTEND_MOVES, formatPercent, isTrap } from "@/utils/bestLine";
 import { formatNumber } from "@/utils/format";
 import { formatScore } from "@/utils/score";
-
-const EXTEND_OPTIONS = [1, 2, 3, 5];
 
 type Row = { node: BestLineNode; path: number[]; level: number; branching: boolean };
 
@@ -354,7 +352,7 @@ export default function BestLineTable({
                         <>
                           <Menu.Divider />
                           <Menu.Label>{t("BestLine.Extend")}</Menu.Label>
-                          {EXTEND_OPTIONS.map((n) => (
+                          {EXTEND_MOVES.map((n) => (
                             <Menu.Item
                               key={n}
                               disabled={disabled}

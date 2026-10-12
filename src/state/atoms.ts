@@ -429,8 +429,8 @@ export type SearchReport = {
     cached: number;
     /** Analyses served by the Lichess cloud evaluation instead of the local engine. */
     cloud: number;
-    /** Local engine analyses, by what the search needed them for. */
-    engine: Record<AnalysisPurpose, number>;
+    /** Local engine analyses, by what the search needed them for (surveys count as evaluations). */
+    engine: Record<Exclude<AnalysisPurpose, "survey">, number>;
     engineSeconds: number;
     /** Explorer requests sent to Lichess (cache misses). */
     explorer: number;

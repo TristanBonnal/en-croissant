@@ -395,6 +395,215 @@ test("searchBestLine finds the same tree when it fetches positions ahead", async
     );
 });
 
+// --- surveying below the first move --------------------------------------------
+
+test("searchBestLine surveys the studied positions below the first at the fast depth when asked", async () => {
+    const book = fakeBook({ shares: [0.5, 0.3] });
+    const engine = fakeEngine([30, 25, 10, 0, -10]);
+    await searchBestLine(params({ maxPlies: 3, surveyBelowRoot: true }), {
+        explore: book.explore,
+        analyze: engine.analyze,
+    });
+
+    const root = engine.analysed.filter((a) => a.fen === INITIAL_FEN);
+    const below = engine.analysed.filter(
+        (a) => a.fen !== INITIAL_FEN && a.fen.split(" ")[1] === "w",
+    );
+    // The move to play is chosen among precise candidates...
+    expect(root[0]).toMatchObject({ purpose: "candidates", multipv: 5 });
+    // ...and judged on what follows, looked at quickly.
+    expect(below.length).toBeGreaterThan(0);
+    for (const a of below) expect(a).toMatchObject({ purpose: "survey", multipv: 5 });
+});
+
+test("searchBestLine analyses every studied position at the precise depth by default", async () => {
+    const book = fakeBook({ shares: [0.5, 0.3] });
+    const engine = fakeEngine([30, 25, 10, 0, -10]);
+    await searchBestLine(params({ maxPlies: 3 }), {
+        explore: book.explore,
+        analyze: engine.analyze,
+    });
+
+    const studied = engine.analysed.filter((a) => a.fen.split(" ")[1] === "w");
+    expect(studied.length).toBeGreaterThan(1);
+    for (const a of studied) expect(a.purpose).toBe("candidates");
+});
+
+test("searchBestLine surveys a position out of book with a single quick analysis too", async () => {
+    // The positions below the first move have too few games to follow the explorer.
+    const [first] = legalSans(INITIAL_FEN, 1);
+    const afterFirst = playSan(INITIAL_FEN, first)!.fen;
+    const thin: Record<string, number> = {};
+    for (const reply of legalSans(afterFirst, 2)) {
+        thin[playSan(afterFirst, reply)!.fen] = 2000;
+    }
+    const book = fakeBook({ shares: [0.6, 0.3], thin });
+    const engine = fakeEngine([30, 25, 10, 0, -10]);
+    await searchBestLine(params({ maxPlies: 4, surveyBelowRoot: true, mode: "tree" }), {
+        explore: book.explore,
+        analyze: engine.analyze,
+    });
+
+    const below = engine.analysed.filter(
+        (a) => a.fen !== INITIAL_FEN && a.fen.split(" ")[1] === "w",
+    );
+    expect(below.length).toBeGreaterThan(0);
+    for (const a of below) expect(a.purpose).not.toBe("decision");
+});
+
+test("searchBestLine's survey does not change what it searches, only how deep it looks", async () => {
+    const run = async (surveyBelowRoot: boolean) => {
+        const book = fakeBook({ shares: [0.5, 0.3, 0.1] });
+        const engine = fakeEngine([30, 25, 10, 0, -10]);
+        const found = await searchBestLine(
+            params({ maxPlies: 3, minReach: 0.01, surveyBelowRoot }),
+            {
+                explore: book.explore,
+                analyze: engine.analyze,
+            },
+        );
+        return toBestLineNodes(found.root, { mode: "tree", metric: "score" }).map((n) => n.san);
+    };
+    expect(await run(true)).toEqual(await run(false));
+});
+
+// --- engine analyses ahead ---------------------------------------------------
+
+test("searchBestLine starts the analyses of the studied positions it will open soon", async () => {
+    const run = async (ahead: boolean) => {
+        const book = fakeBook({ shares: [0.5, 0.3, 0.1] });
+        const engine = fakeEngine([30, 25, 10, 0, -10]);
+        const warmed: { fen: string; request: unknown }[] = [];
+        const result = await searchBestLine(params({ maxPlies: 5, minReach: 0.01 }), {
+            explore: book.explore,
+            analyze: engine.analyze,
+            warm: ahead
+                ? (fen, request) => {
+                      warmed.push({ fen, request });
+                      return engine.analyze(fen, request);
+                  }
+                : undefined,
+        });
+        return { ...result, warmed };
+    };
+    const plain = await run(false);
+    const ahead = await run(true);
+
+    expect(ahead.warmed.length).toBeGreaterThan(0);
+    // The studied side's positions, asked for exactly as the search will ask.
+    for (const { fen, request } of ahead.warmed) {
+        expect(fen.split(" ")[1]).toBe("w");
+        expect(fen).not.toBe(INITIAL_FEN);
+        expect(request).toEqual({ purpose: "candidates", multipv: 5 });
+    }
+    // Starting analyses early changes when they run, not what the search finds.
+    expect(ahead.stats).toEqual(plain.stats);
+    expect(toBestLineNodes(ahead.root, { mode: "tree", metric: "score" })).toEqual(
+        toBestLineNodes(plain.root, { mode: "tree", metric: "score" }),
+    );
+});
+
+test("searchBestLine starts no analysis for a position it leaves the book at", async () => {
+    // After each first move, the replies are played 12 000, 6 000 and 2 000 times:
+    // the last is too few to follow the explorer.
+    const thin: Record<string, number> = {};
+    const lastReplies: string[] = [];
+    const secondReplies: string[] = [];
+    for (const first of legalSans(INITIAL_FEN, 5)) {
+        const afterFirst = playSan(INITIAL_FEN, first)!.fen;
+        thin[afterFirst] = 20_000;
+        const [, second, last] = legalSans(afterFirst, 3).map(
+            (san) => playSan(afterFirst, san)!.fen,
+        );
+        secondReplies.push(second);
+        lastReplies.push(last);
+    }
+    const book = fakeBook({ shares: [0.6, 0.3, 0.1], thin });
+    const engine = fakeEngine();
+    const warmed: string[] = [];
+    await searchBestLine(params({ maxPlies: 4, minReach: 0.01 }), {
+        explore: book.explore,
+        analyze: engine.analyze,
+        warm: (fen, request) => (warmed.push(fen), engine.analyze(fen, request)),
+    });
+
+    expect(warmed.some((fen) => secondReplies.includes(fen))).toBe(true);
+    for (const fen of lastReplies) expect(warmed).not.toContain(fen);
+});
+
+test("searchBestLine offers a position again while no engine is free to analyse it", async () => {
+    const run = async (free: number) => {
+        const book = fakeBook({ shares: [0.5, 0.3, 0.1] });
+        const engine = fakeEngine([30, 25, 10, 0, -10]);
+        let asked = 0;
+        const warmed: string[] = [];
+        const result = await searchBestLine(params({ maxPlies: 5, minReach: 0.01 }), {
+            explore: book.explore,
+            analyze: engine.analyze,
+            warm: (fen, request) => {
+                if (asked++ < free) return false;
+                warmed.push(fen);
+                return engine.analyze(fen, request);
+            },
+        });
+        return { ...result, asked, warmed };
+    };
+    const busy = await run(5);
+    const idle = await run(0);
+
+    expect(busy.asked).toBeGreaterThan(5);
+    // The declined positions were offered again, not given up on.
+    expect(busy.warmed.length).toBeGreaterThan(0);
+    expect(toBestLineNodes(busy.root, { mode: "tree", metric: "score" })).toEqual(
+        toBestLineNodes(idle.root, { mode: "tree", metric: "score" }),
+    );
+});
+
+test("searchBestLine also starts the check of the played moves the engine ranks beyond its fifth line", async () => {
+    const run = async (ahead: boolean) => {
+        // Six moves played, all within tolerance: the sixth is out of the engine's five lines.
+        const book = fakeBook({ shares: [0.15, 0.15, 0.15, 0.15, 0.15, 0.25] });
+        const engine = fakeEngine([30, 25, 20, 15, 10, 5]);
+        const cache = new Map<string, ReturnType<typeof book.explore>>();
+        const explore = (fen: string) => {
+            if (!cache.has(fen)) cache.set(fen, book.explore(fen));
+            return cache.get(fen)!;
+        };
+        const warmed: { fen: string; searchMoves?: string[] }[] = [];
+        const result = await searchBestLine(params({ maxPlies: 4, minReach: 0.01 }), {
+            explore,
+            analyze: engine.analyze,
+            prefetch: ahead
+                ? (fen) => {
+                      void explore(fen);
+                      return true;
+                  }
+                : undefined,
+            warm: ahead
+                ? (fen, request) => {
+                      warmed.push({ fen, searchMoves: request.searchMoves });
+                      return engine.analyze(fen, request);
+                  }
+                : undefined,
+        });
+        return { ...result, warmed };
+    };
+    const plain = await run(false);
+    const ahead = await run(true);
+
+    const restricted = ahead.warmed.filter((w) => w.searchMoves);
+    expect(restricted.length).toBeGreaterThan(0);
+    for (const { fen, searchMoves } of restricted) {
+        // The position's first lines were asked for too, and the move left out is its sixth.
+        expect(ahead.warmed.some((w) => w.fen === fen && !w.searchMoves)).toBe(true);
+        expect(searchMoves).toEqual([uciOf(fen, legalSans(fen, 6)[5])]);
+    }
+    expect(ahead.stats).toEqual(plain.stats);
+    expect(toBestLineNodes(ahead.root, { mode: "tree", metric: "score" })).toEqual(
+        toBestLineNodes(plain.root, { mode: "tree", metric: "score" }),
+    );
+});
+
 // --- coverage ----------------------------------------------------------------
 
 // --- candidates --------------------------------------------------------------

@@ -10,10 +10,12 @@ import {
     fenAfter,
     bestLineSettingsSchema,
     cloudLinesUsable,
+    isPreciseAnalysis,
     isTrap,
     isTrapMistake,
     lineComment,
     mainLine,
+    mainLinePath,
     mistakeAnnotation,
     movesTo,
     resultPathOf,
@@ -53,6 +55,10 @@ const whiteLines = [
     line("c4", "c2c4", 10, 4),
     line("g3", "g2g3", 0, 5),
 ];
+
+test("the settings add the live analysis' move to the board by default", () => {
+    expect(bestLineSettingsSchema.parse({}).liveAddMove).toBe(true);
+});
 
 test("the settings use the wins metric by default", () => {
     expect(bestLineSettingsSchema.parse({}).metric).toBe("wins");
@@ -132,6 +138,34 @@ test("mainLine follows the first child of each node", () => {
     expect(mainLine(tree).map((n) => n.san)).toEqual(["e4", "e5"]);
 });
 
+test("only candidates and decisions are analysed at the precise depth", () => {
+    expect(isPreciseAnalysis("candidates")).toBe(true);
+    expect(isPreciseAnalysis("decision")).toBe(true);
+    expect(isPreciseAnalysis("evaluation")).toBe(false);
+    expect(isPreciseAnalysis("survey")).toBe(false);
+});
+
+test("mainLinePath leads to the last move of the main line, however the tree branches", () => {
+    const leaf = (san: string, children: BestLineNode[] = []): BestLineNode => ({
+        san,
+        uci: san,
+        color: "white",
+        fen: "",
+        reason: "engine",
+        candidates: [],
+        children,
+    });
+    const tree = [
+        leaf("e4", [
+            leaf("e5", [leaf("Nf3", [leaf("Nc6")]), leaf("d4")]),
+            leaf("c5", [leaf("Nf3")]),
+        ]),
+    ];
+    expect(mainLinePath(tree)).toEqual([0, 0, 0, 0]);
+    expect(nodeAt(tree, mainLinePath(tree))?.san).toBe("Nc6");
+    expect(mainLinePath([])).toEqual([]);
+});
+
 // --- rate limit --------------------------------------------------------------
 
 class RateLimited extends Error {}
@@ -178,6 +212,78 @@ test("withRateLimitRetry does not retry other errors", async () => {
             throw new Error("500");
         }, noWait),
     ).rejects.toThrow("500");
+    expect(calls).toBe(1);
+});
+
+class Flaky extends Error {}
+
+test("withRateLimitRetry retries a transient failure after a short wait", async () => {
+    let calls = 0;
+    const waits: number[] = [];
+    const result = await withRateLimitRetry(
+        async () => {
+            calls++;
+            if (calls < 3) throw new Flaky("503");
+            return "ok";
+        },
+        {
+            ...noWait,
+            isTransient: (e) => e instanceof Flaky,
+            transientDelaysMs: [1000, 3000, 8000],
+            onWait: (ms) => waits.push(ms),
+        },
+    );
+    expect(result).toBe("ok");
+    expect(waits).toEqual([1000, 3000]);
+});
+
+test("withRateLimitRetry gives up on a transient failure after the last short wait", async () => {
+    let calls = 0;
+    await expect(
+        withRateLimitRetry(
+            async () => {
+                calls++;
+                throw new Flaky("503");
+            },
+            { ...noWait, isTransient: (e) => e instanceof Flaky, transientDelaysMs: [1, 2] },
+        ),
+    ).rejects.toThrow("503");
+    expect(calls).toBe(3);
+});
+
+test("withRateLimitRetry counts rate limits and transient failures apart", async () => {
+    let calls = 0;
+    const waits: number[] = [];
+    const result = await withRateLimitRetry(
+        async () => {
+            calls++;
+            if (calls === 1) throw new RateLimited();
+            if (calls === 2) throw new Flaky("503");
+            return "ok";
+        },
+        {
+            ...noWait,
+            delayMs: 60000,
+            isTransient: (e) => e instanceof Flaky,
+            transientDelaysMs: [500],
+            onWait: (ms) => waits.push(ms),
+        },
+    );
+    expect(result).toBe("ok");
+    expect(waits).toEqual([60000, 500]);
+});
+
+test("withRateLimitRetry does not retry a transient failure once cancelled", async () => {
+    let calls = 0;
+    await expect(
+        withRateLimitRetry(
+            async () => {
+                calls++;
+                throw new Flaky("503");
+            },
+            { ...noWait, isTransient: () => true, transientDelaysMs: [1], isCancelled: () => true },
+        ),
+    ).rejects.toThrow("503");
     expect(calls).toBe(1);
 });
 

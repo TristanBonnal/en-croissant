@@ -18,6 +18,7 @@ import {
     isLive,
     type SearchNode,
 } from "./node";
+import { settleAll } from "./parallel";
 import { legalMoveCount, playSan, positionOf, sanKey, uciOf } from "./position";
 import { keptEdges } from "./project";
 import type { Frontier } from "./frontier";
@@ -54,6 +55,10 @@ const MAX_EXPANDED = 3000;
 const MAX_CANDIDATES = 5;
 /** Moves played often enough that the engine ranks lower, checked in a second analysis. */
 const MAX_EXTRA_CANDIDATES = 5;
+/** The engine's first analysis of a studied position. */
+const CANDIDATES_REQUEST: AnalysisRequest = { purpose: "candidates", multipv: MAX_CANDIDATES };
+/** The same, for a position that only serves to judge a move above it. */
+const SURVEY_REQUEST: AnalysisRequest = { purpose: "survey", multipv: MAX_CANDIDATES };
 /** Frequent mistakes of the opponent examined per position when branching on traps. */
 const MAX_TRAPS = 3;
 /** Opponent replies listed but not searched, for the result table. */
@@ -118,6 +123,11 @@ export type SearchParams = {
     mode?: "line" | "tree";
     /** Plies of the tree that are kept, the engine's line being played out that far only. */
     keepPlies?: number;
+    /**
+     * The studied positions below the first only serve to judge the first move:
+     * the engine looks at them at the fast depth, and the first at the precise one.
+     */
+    surveyBelowRoot?: boolean;
 };
 
 export type SearchStats = {
@@ -143,6 +153,13 @@ export type SearchDeps = {
      * false when it can't start now, to be offered again later.
      */
     prefetch?: (fen: string) => boolean;
+    /**
+     * Starts, without waiting, an engine analysis the search will probably ask
+     * for soon, on an engine that has nothing else to do, so that `analyze`
+     * finds it under way. Returns the analysis, or false when no engine is
+     * free, to be offered again later.
+     */
+    warm?: (fen: string, request: AnalysisRequest) => Promise<BestMoves[]> | false;
     isCancelled?: () => boolean;
     onProgress?: (stats: SearchStats, root: SearchNode) => void;
 };
@@ -172,6 +189,10 @@ export async function searchBestLine(
     const options = backupOptionsOf(params.risk);
     const trustGames = Math.max(params.minGamesPerMove, TRUST_FLOOR);
     const keepPlies = params.keepPlies ?? Number.POSITIVE_INFINITY;
+    /** Whether the engine only looks at the position quickly, for it only serves to judge a move above. */
+    const surveyed = (node: SearchNode) => params.surveyBelowRoot === true && node.ply > 0;
+    const candidatesRequestOf = (node: SearchNode) =>
+        surveyed(node) ? SURVEY_REQUEST : CANDIDATES_REQUEST;
     const stats: SearchStats = {
         expanded: 0,
         pruned: 0,
@@ -220,7 +241,7 @@ export async function searchBestLine(
     /** The single move the engine plays where the explorer knows too little. */
     async function followEngine(node: SearchNode) {
         const request: AnalysisRequest = node.studied
-            ? { purpose: "decision", multipv: 1 }
+            ? { purpose: surveyed(node) ? "survey" : "decision", multipv: 1 }
             : { purpose: "evaluation", multipv: 1 };
         const [best] = await deps.analyze(node.fen, request);
         if (!best) {
@@ -288,28 +309,54 @@ export async function searchBestLine(
         explorer: ExplorerPosition,
         enough: (move: ExplorerMove) => boolean,
     ): Promise<BestMoves[]> {
+        const left = playedMovesToCheck(node.fen, lines, explorer, enough);
+        if (left.length === 0) return lines;
+        const more = await deps.analyze(
+            node.fen,
+            playedMovesRequest(node.fen, left, candidatesRequestOf(node).purpose),
+        );
+        // An engine that ignored the restriction says nothing about those moves.
+        const asked = new Set(left.map((move) => sanKey(move.san)));
+        return [...lines, ...more.filter((line) => asked.has(sanKey(line.sanMoves[0])))];
+    }
+
+    /** Moves played often enough, in a position of `positionGames` games, to be ranked on their results. */
+    function enoughOf(positionGames: number) {
+        return (move: ExplorerMove) =>
+            totalGames(outcomeOf(move, params.color)) >= params.minGamesPerMove &&
+            totalGames(outcomeOf(move, params.color)) >= params.minMoveShare * positionGames;
+    }
+
+    /** The played moves the engine's first lines may have left out, most played first. */
+    function playedMovesToCheck(
+        fen: string,
+        lines: BestMoves[],
+        explorer: ExplorerPosition,
+        enough: (move: ExplorerMove) => boolean,
+    ): ExplorerMove[] {
         const last = lines[lines.length - 1];
-        if (lines.length < MAX_CANDIDATES || !last) return lines;
-        if (!admissibleMoves(lines, turnOf(node.fen), params.tolerance).includes(last)) {
-            return lines;
-        }
+        if (lines.length < MAX_CANDIDATES || !last) return [];
+        if (!admissibleMoves(lines, turnOf(fen), params.tolerance).includes(last)) return [];
         const proposed = new Set(lines.map((line) => sanKey(line.sanMoves[0])));
-        const left = explorer.moves
+        return explorer.moves
             .filter((move) => !proposed.has(sanKey(move.san)) && enough(move))
             .sort(
                 (a, b) =>
                     totalGames(outcomeOf(b, params.color)) - totalGames(outcomeOf(a, params.color)),
             )
             .slice(0, MAX_EXTRA_CANDIDATES);
-        if (left.length === 0) return lines;
-        const more = await deps.analyze(node.fen, {
-            purpose: "candidates",
-            multipv: left.length,
-            searchMoves: left.map((move) => uciOf(node.fen, move.san) ?? move.uci),
-        });
-        // An engine that ignored the restriction says nothing about those moves.
-        const asked = new Set(left.map((move) => sanKey(move.san)));
-        return [...lines, ...more.filter((line) => asked.has(sanKey(line.sanMoves[0])))];
+    }
+
+    function playedMovesRequest(
+        fen: string,
+        moves: ExplorerMove[],
+        purpose: AnalysisRequest["purpose"],
+    ): AnalysisRequest {
+        return {
+            purpose,
+            multipv: moves.length,
+            searchMoves: moves.map((move) => uciOf(fen, move.san) ?? move.uci),
+        };
     }
 
     /**
@@ -323,14 +370,8 @@ export async function searchBestLine(
      */
     async function expandStudied(node: SearchNode, explorer: ExplorerPosition) {
         const moveGames = (move: ExplorerMove) => totalGames(outcomeOf(move, params.color));
-        const positionGames = totalGames(node.outcome);
-        const enough = (move: ExplorerMove) =>
-            moveGames(move) >= params.minGamesPerMove &&
-            moveGames(move) >= params.minMoveShare * positionGames;
-        const first = await deps.analyze(node.fen, {
-            purpose: "candidates",
-            multipv: MAX_CANDIDATES,
-        });
+        const enough = enoughOf(totalGames(node.outcome));
+        const first = await deps.analyze(node.fen, candidatesRequestOf(node));
         const lines = await withPlayedMoves(node, first, explorer, enough);
         const admissible = admissibleMoves(lines, turnOf(node.fen), params.tolerance);
         const byMove = new Map(explorer.moves.map((move) => [sanKey(move.san), move]));
@@ -449,12 +490,21 @@ export async function searchBestLine(
         const [before] = await deps.analyze(node.fen, { purpose: "evaluation", multipv: 1 });
         if (!before) return [];
         node.evaluation = before.score;
-        const opened: Edge[] = [];
-        for (const edge of pool.slice(0, MAX_TRAPS)) {
-            if (deps.isCancelled?.()) break;
+        const replies = pool.slice(0, MAX_TRAPS).flatMap((edge) => {
             const next = playSan(node.fen, edge.san);
-            if (!next) continue;
-            const [after] = await deps.analyze(next.fen, { purpose: "evaluation", multipv: 1 });
+            return next ? [{ edge, fen: next.fen }] : [];
+        });
+        // The replies are judged side by side, then opened in their order.
+        const judged: Awaited<ReturnType<typeof deps.analyze>>[] = [];
+        await settleAll(
+            replies.map(async ({ fen }, i) => {
+                judged[i] = await deps.analyze(fen, { purpose: "evaluation", multipv: 1 });
+            }),
+        );
+        const opened: Edge[] = [];
+        for (const [i, { edge }] of replies.entries()) {
+            if (deps.isCancelled?.()) break;
+            const [after] = judged[i];
             if (!after) continue;
             const annotation = mistakeAnnotation(before.score, after.score, turnOf(node.fen));
             if (annotation !== "?" && annotation !== "??") continue;
@@ -624,19 +674,64 @@ export async function searchBestLine(
         }
     }
 
-    /**
-     * Fetches ahead the positions next in line, so that their explorer requests
-     * run while the search waits on the engine or on another request. The order
-     * in which positions are opened is unchanged, and so is the result.
-     */
     const prefetched = new WeakSet<SearchNode>();
+    /** The analysis started ahead for a position, with the explorer's answer under way for it. */
+    const warmed = new WeakMap<SearchNode, Promise<BestMoves[]> | null>();
+    const chained = new WeakSet<SearchNode>();
+
+    /**
+     * Once the engine's first lines of a position being warmed are known, asks
+     * for the check of the played moves it ranks lower too, as the search would
+     * otherwise wait for it after them. The explorer's answer is the one under
+     * way, never a new request.
+     */
+    async function warmPlayedMoves(node: SearchNode, first: Promise<BestMoves[]>) {
+        try {
+            const [lines, explorer] = await Promise.all([first, deps.explore(node.fen)]);
+            const enough = enoughOf(totalGames(outcomeOf(explorer, params.color)));
+            const left = playedMovesToCheck(node.fen, lines, explorer, enough);
+            if (left.length > 0) {
+                const { purpose } = candidatesRequestOf(node);
+                deps.warm?.(node.fen, playedMovesRequest(node.fen, left, purpose));
+            }
+        } catch {
+            // The search meets the same failure when it gets there.
+        }
+    }
+
+    /**
+     * Gets ready the positions next in line, so that what they need is under
+     * way while the search waits on the engine or on a request: the explorer's
+     * answer for all of them, and the engine's candidates for the studied
+     * ones the book still follows (the others are played by their own games,
+     * or by a single quick analysis). The order in which positions are opened
+     * is unchanged, and so is the result.
+     */
     function prefetchAhead(frontier: Frontier<SearchNode>) {
-        const prefetch = deps.prefetch;
-        if (!prefetch) return;
-        const next = frontier.peek(LOOKAHEAD, (node) => !prefetched.has(node));
+        const { prefetch, warm } = deps;
+        if (!prefetch && !warm) return;
+        const next = frontier.peek(
+            LOOKAHEAD,
+            (node) => !(prefetched.has(node) && warmed.has(node)),
+        );
         for (const node of next) {
-            if (positionOf(node.fen)?.isEnd() !== false || prefetch(node.fen)) {
+            const over = positionOf(node.fen)?.isEnd() !== false;
+            if (!prefetched.has(node) && (over || !prefetch || prefetch(node.fen))) {
                 prefetched.add(node);
+            }
+            if (!warmed.has(node)) {
+                const needsEngine =
+                    warm !== undefined &&
+                    !over &&
+                    node.studied &&
+                    totalGames(node.outcome) >= params.minimumGames;
+                const started = needsEngine ? warm(node.fen, candidatesRequestOf(node)) : null;
+                if (started !== false) warmed.set(node, started);
+            }
+            const first = warmed.get(node);
+            if (first && prefetch && prefetched.has(node) && !chained.has(node)) {
+                chained.add(node);
+                void warmPlayedMoves(node, first);
             }
         }
     }
@@ -668,9 +763,13 @@ export async function searchBestLine(
                 }
                 return;
             }
-            for (const edge of keptEdges(node, params.mode ?? "tree")) {
-                if (edge.child) await walk(edge.child);
-            }
+            // Each line is a chain of analyses, one after the other; the lines are
+            // independent, and are played side by side.
+            await settleAll(
+                keptEdges(node, params.mode ?? "tree").flatMap((edge) =>
+                    edge.child ? [walk(edge.child)] : [],
+                ),
+            );
         };
         await walk(root);
     }

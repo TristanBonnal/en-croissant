@@ -12,6 +12,9 @@ import { getNodeAtPath, type TreeNode } from "./treeReducer";
 /** Number of engine lines analysed for each position. */
 export const BEST_LINE_MULTIPV = 5;
 
+/** Numbers of moves a line can be extended by. */
+export const EXTEND_MOVES = [1, 2, 3, 5];
+
 /** A trap must be punished in practice: games after it, and score gained by the studied side. */
 export const TRAP_MIN_GAMES = 30;
 export const TRAP_MIN_GAIN = 0.03;
@@ -36,6 +39,8 @@ export const bestLineSettingsSchema = z.object({
     minGamesPerMove: z.number().int().min(0).default(100),
     /** Moves of the studied side the live analysis looks at to choose its move. */
     liveMoves: z.number().int().min(1).max(6).default(2),
+    /** Whether the live analysis adds the move it chose to the line on the board. */
+    liveAddMove: z.boolean().default(true),
     /** Share of the position's games a move needs to be ranked on its results. */
     minMoveShare: z.number().min(0).max(1).default(0.01),
 });
@@ -156,7 +161,9 @@ export type AnalysisPurpose =
     /** Evaluates a position whose move was played without the engine, at the fast depth. */
     | "evaluation"
     /** Chooses the move when the stats can't, at the precise depth. */
-    | "decision";
+    | "decision"
+    /** Looks at a position that only serves to judge a move above it, at the fast depth. */
+    | "survey";
 
 /** Whether an analysis for `purpose` runs at the precise depth. */
 export function isPreciseAnalysis(purpose: AnalysisPurpose) {
@@ -254,6 +261,11 @@ export function mainLine(nodes: BestLineNode[]): BestLineNode[] {
         current = current.children[0];
     }
     return line;
+}
+
+/** Path of the last move of the main line. */
+export function mainLinePath(nodes: BestLineNode[]): number[] {
+    return mainLine(nodes).map(() => 0);
 }
 
 export function nodeAt(nodes: BestLineNode[], path: number[]): BestLineNode | undefined {
@@ -401,32 +413,54 @@ export function lineComment(
     return { text: "" };
 }
 
-/** Retries `fn` when it is rate-limited, waiting `delayMs` before each new try. */
+/**
+ * Retries `fn` when it is rate-limited, waiting `delayMs` before each new try,
+ * and when it fails in a way that usually passes (`isTransient`: the network
+ * dropped, the server hiccuped), waiting the successive `transientDelaysMs`.
+ * Both are counted apart: a minute's wait for a rate limit says nothing about
+ * how many hiccups to put up with.
+ */
 export async function withRateLimitRetry<T>(
     fn: () => Promise<T>,
     {
         isRateLimited,
+        isTransient,
         sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
         delayMs = 60_000,
         retries = 3,
+        transientDelaysMs = [1_500, 4_000, 10_000],
         onWait,
         isCancelled,
     }: {
         isRateLimited: (error: unknown) => boolean;
+        isTransient?: (error: unknown) => boolean;
         sleep?: (ms: number) => Promise<void>;
         delayMs?: number;
         retries?: number;
+        transientDelaysMs?: number[];
         onWait?: (ms: number) => void;
         isCancelled?: () => boolean;
     },
 ): Promise<T> {
-    for (let attempt = 0; ; attempt++) {
+    let limited = 0;
+    let failed = 0;
+    for (;;) {
         try {
             return await fn();
         } catch (e) {
-            if (!isRateLimited(e) || attempt >= retries || isCancelled?.()) throw e;
-            onWait?.(delayMs);
-            await sleep(delayMs);
+            if (isCancelled?.()) throw e;
+            let wait: number;
+            if (isRateLimited(e)) {
+                if (limited++ >= retries) throw e;
+                wait = delayMs;
+            } else if (isTransient?.(e)) {
+                if (failed >= transientDelaysMs.length) throw e;
+                wait = transientDelaysMs[failed++];
+            } else {
+                throw e;
+            }
+            onWait?.(wait);
+            await sleep(wait);
             if (isCancelled?.()) throw e;
         }
     }
